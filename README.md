@@ -1,4 +1,4 @@
-# VPNproxi
+# PROXI
 
 VPNproxi is a lightweight standalone control panel for a single intermediate VPS that turns IPsec client traffic into a managed gateway. The stable production mode is Direct NAT; Xray egress can be enabled explicitly for selective or full proxy routing.
 
