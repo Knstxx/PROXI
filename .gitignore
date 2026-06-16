@@ -1,0 +1,6 @@
+dev-state.json
+vpnproxi
+*.log
+*.tmp
+.DS_Store
+materials/

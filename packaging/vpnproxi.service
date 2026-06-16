@@ -1,0 +1,14 @@
+[Unit]
+Description=VPNproxi control panel
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=/etc/vpnproxi/vpnproxi.env
+ExecStart=/usr/local/bin/vpnproxi --addr :8443 --log /var/log/vpnproxi/vpnproxi.log
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
