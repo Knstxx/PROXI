@@ -1,5 +1,27 @@
 # VPNproxi Operations
 
+## Deployment Prerequisites
+
+Gateway host:
+
+- clean Debian or Ubuntu VPS;
+- public IP address;
+- DNS `A` record pointing the VPN domain to that host;
+- `500/udp` and `4500/udp` open for IPsec;
+- `80/tcp` and `443/tcp` open when the UI is published through `--domain`.
+
+External exit host:
+
+- separate VPS reachable from the gateway;
+- running 3x-ui or equivalent Xray-compatible node;
+- at least one exported share link supported by VPNproxi:
+  - `vless`
+  - `vmess`
+  - `trojan`
+  - `ss`
+  - `hysteria2` / `hy2`
+  - `wireguard` / `wg`
+
 ## Services
 
 - `vpnproxi.service` - web UI and API.
