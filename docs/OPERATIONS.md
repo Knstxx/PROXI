@@ -25,6 +25,7 @@ External exit host:
 ## Services
 
 - `vpnproxi.service` - web UI and API.
+- `vpnproxi-apply.service` - reapplies firewall, Xray, and StrongSwan state on boot.
 - `strongswan` - IKEv2/IPsec endpoint.
 - `xray` - transparent receiver for the IPsec subnet and outbound proxy engine.
 - `vpnproxi-geodata.timer` - daily runetfreedom geosite/geoip update.
@@ -51,7 +52,7 @@ External exit host:
 ## Health Checks
 
 ```bash
-systemctl status vpnproxi xray strongswan vpnproxi-geodata.timer
+systemctl status vpnproxi vpnproxi-apply.service xray strongswan vpnproxi-geodata.timer
 swanctl --list-conns
 swanctl --list-sas
 iptables -t mangle -S VPNPROXI_TPROXY
@@ -86,6 +87,5 @@ systemctl restart vpnproxi
 5. If IPsec clients connect but traffic does not route:
 
 ```bash
-/usr/local/bin/vpnproxi-firewall.sh
-systemctl restart strongswan
+systemctl start vpnproxi-apply.service
 ```

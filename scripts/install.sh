@@ -211,8 +211,25 @@ RestartSec=3
 WantedBy=multi-user.target
 EOF
 
+cat > /etc/systemd/system/vpnproxi-apply.service <<'EOF'
+[Unit]
+Description=VPNproxi host apply
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+EnvironmentFile=/etc/vpnproxi/vpnproxi.env
+ExecStart=/usr/local/bin/vpnproxi --apply-once
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
 systemctl daemon-reload
+systemctl enable vpnproxi-apply.service
 systemctl restart vpnproxi 2>/dev/null || systemctl enable --now vpnproxi
+systemctl start vpnproxi-apply.service
 
 echo "VPNproxi is running on $PUBLIC_URL"
 echo "Admin credentials are stored in $AUTH_FILE"

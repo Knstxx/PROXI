@@ -1,0 +1,12 @@
+[Unit]
+Description=VPNproxi host apply
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+EnvironmentFile=/etc/vpnproxi/vpnproxi.env
+ExecStart=/usr/local/bin/vpnproxi --apply-once
+
+[Install]
+WantedBy=multi-user.target

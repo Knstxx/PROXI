@@ -38,6 +38,7 @@ func Apply(state core.State) (Result, error) {
 		{state.Server.UsersCSVPath, bundle.UsersCSV, 0o600},
 		{"/usr/local/bin/vpnproxi-geodata-update.sh", bundle.GeodataScript, 0o755},
 		{"/usr/local/bin/vpnproxi-firewall.sh", bundle.FirewallScript, 0o755},
+		{"/etc/systemd/system/vpnproxi-apply.service", []byte(applyServiceUnit()), 0o644},
 		{"/etc/systemd/system/vpnproxi-geodata.service", []byte(geodataServiceUnit()), 0o644},
 		{"/etc/systemd/system/vpnproxi-geodata.timer", []byte(geodataTimerUnit()), 0o644},
 	}
@@ -51,6 +52,9 @@ func Apply(state core.State) (Result, error) {
 		return res, err
 	}
 	if err := runRequired(&res, "systemctl", "daemon-reload"); err != nil {
+		return res, err
+	}
+	if err := runRequired(&res, "systemctl", "enable", "vpnproxi-apply.service"); err != nil {
 		return res, err
 	}
 	if err := runRequired(&res, "systemctl", "enable", "--now", "vpnproxi-geodata.timer"); err != nil {
@@ -208,6 +212,22 @@ Description=VPNproxi geodata update
 [Service]
 Type=oneshot
 ExecStart=/usr/local/bin/vpnproxi-geodata-update.sh
+`
+}
+
+func applyServiceUnit() string {
+	return `[Unit]
+Description=VPNproxi host apply
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+EnvironmentFile=/etc/vpnproxi/vpnproxi.env
+ExecStart=/usr/local/bin/vpnproxi --apply-once
+
+[Install]
+WantedBy=multi-user.target
 `
 }
 
