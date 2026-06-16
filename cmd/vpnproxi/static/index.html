@@ -1,0 +1,244 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>VPNproxi</title>
+  <link rel="icon" href='data:image/svg+xml,%3Csvg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"%3E%3Crect width="64" height="64" rx="12" fill="%23070b12"/%3E%3Cpath d="M18 32h28M32 18v28M23 23l18 18M41 23 23 41" stroke="%232ee6a6" stroke-width="5" stroke-linecap="round"/%3E%3C/svg%3E'>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <section class="login-overlay" id="loginOverlay">
+    <form class="login-card" id="loginForm" autocomplete="off">
+      <div>
+        <h2 data-i18n="loginTitle">Sign in</h2>
+        <p data-i18n="loginSubtitle">Use the administrator credentials created during deployment.</p>
+      </div>
+      <div>
+        <label data-i18n="adminUsername">Username</label>
+        <input id="loginUsername" autocomplete="off">
+      </div>
+      <div>
+        <label data-i18n="adminPassword">Password</label>
+        <input id="loginPassword" type="password" autocomplete="new-password">
+      </div>
+      <p class="login-error" id="loginError"></p>
+      <button type="submit" class="primary" data-i18n="loginAction">Sign in</button>
+    </form>
+  </section>
+  <main class="shell" id="appShell" hidden>
+    <section class="topbar">
+      <div>
+        <h1>VPNproxi <span class="product-kicker" data-i18n="appKicker">control plane</span></h1>
+        <p data-i18n="appSubtitle">IPsec gateway with Xray selective egress</p>
+      </div>
+      <div class="topbar-actions">
+        <div class="lang-switch" aria-label="Language">
+          <button type="button" data-language="ru" data-i18n="langRu">RU</button>
+          <button type="button" data-language="en" data-i18n="langEn">EN</button>
+        </div>
+        <div class="status-pill session-pill" id="sessionUser" hidden></div>
+        <button type="button" id="logoutBtn" class="ghost" data-i18n="logout" hidden>Logout</button>
+        <div class="status-pill" id="stateBadge" data-i18n="stateLoading">loading</div>
+      </div>
+    </section>
+
+    <section class="workspace">
+      <div class="main-column">
+        <form id="configForm" class="config-stack">
+          <section class="panel panel-main">
+            <div class="section-title">
+              <h2 data-i18n="trafficRouting">Traffic routing</h2>
+              <span id="protocolBadge" data-i18n="protocolNotConfigured">not configured</span>
+            </div>
+            <div class="route-entry">
+              <div>
+                <label class="help-label" data-i18n="shareLink" data-tip-key="tipShareLink">3x-ui / Xray share link</label>
+                <textarea id="shareLink" rows="4" data-i18n-placeholder="sharePlaceholder" placeholder="vless://...  hysteria2://...  vmess://..."></textarea>
+              </div>
+              <div class="route-tools">
+                <button type="button" id="probeLinkBtn" class="ghost" data-i18n="checkRoute">Check route</button>
+                <p id="routeProbeStatus" class="route-probe-status" data-i18n="routeCheckIdle">Route check has not been run yet.</p>
+              </div>
+            </div>
+
+            <div class="desktop-fields">
+              <div class="field-group">
+                <div class="section-title compact flush"><h2 data-i18n="gateway">Gateway</h2></div>
+                <div class="split">
+                  <div>
+                    <label class="help-label" data-i18n="vpnDomain" data-tip-key="tipVpnDomain">VPN domain</label>
+                    <input id="vpnDomain" data-i18n-placeholder="vpnDomainPlaceholder" placeholder="vpn.example.com">
+                  </div>
+                  <div>
+                    <label class="help-label" data-i18n="vpnSubnet" data-tip-key="tipVpnSubnet">VPN subnet</label>
+                    <input id="vpnSubnet" data-i18n-placeholder="vpnSubnetPlaceholder" placeholder="10.10.10.0/24">
+                  </div>
+                </div>
+              </div>
+
+              <div class="field-group">
+                <div class="section-title compact flush"><h2 data-i18n="endpoint">Endpoint</h2><button type="button" id="copyIpsecEndpoint" class="ghost" data-i18n="copy">Copy</button></div>
+                <div class="endpoint-card">
+                  <div>
+                    <span data-i18n="currentUiHost">Current UI host</span>
+                    <strong id="uiHostValue">-</strong>
+                  </div>
+                  <div>
+                    <span data-i18n="ipsecServerAddress">IPsec server address</span>
+                    <strong id="ipsecEndpointValue">-</strong>
+                  </div>
+                  <p id="endpointHint" data-i18n="endpointHint">Create a DNS A record to this host, then put the domain into VPN domain and save.</p>
+                </div>
+              </div>
+            </div>
+
+            <div class="section-title compact">
+              <h2 data-i18n="routing">Routing</h2>
+              <label class="toggle help-label" id="useRunetWrap" data-tip-key="tipRunet"><input id="useRunet" type="checkbox"> <span data-i18n="runetGeodata">Blocked lists</span></label>
+            </div>
+            <div class="routing-mode-panel">
+              <label class="help-label" data-i18n="routingMode" data-tip-key="tipRoutingMode">Routing mode</label>
+              <select id="routingMode" class="visually-hidden" aria-label="Routing mode">
+                <option value="direct" data-i18n="routingModeDirect">Direct NAT</option>
+                <option value="selective" data-i18n="routingModeSelective">Selective Xray</option>
+                <option value="force_proxy" data-i18n="routingModeForceProxy">Force Xray</option>
+              </select>
+            <div class="mode-cards" id="routingModeCards" role="group" aria-label="Routing mode">
+                <button type="button" class="mode-card" data-route-mode="direct">
+                  <strong data-i18n="routingModeDirect">Direct NAT</strong>
+                  <span data-i18n="routingModeDirectHelp">Fast direct gateway. Proxy rules are saved but not used.</span>
+                </button>
+                <button type="button" class="mode-card" data-route-mode="selective">
+                  <strong data-i18n="routingModeSelective">Selective Xray</strong>
+                  <span data-i18n="routingModeSelectiveHelp">Only matching proxy rules and blocked lists go through the external outbound.</span>
+                </button>
+                <button type="button" class="mode-card" data-route-mode="force_proxy">
+                  <strong data-i18n="routingModeForceProxy">Force Xray</strong>
+                  <span data-i18n="routingModeForceProxyHelp">All client TCP traffic goes through the external outbound except direct overrides.</span>
+                </button>
+            </div>
+            <p class="routing-flow" data-i18n="routingFlow">Choose a mode, review changes, then Apply. Reconnect the VPN after Apply.</p>
+          </div>
+          <div id="routingModeNotice" class="mode-notice" hidden></div>
+          <div class="routing-grid">
+            <div>
+              <label class="help-label" data-i18n="proxyDomains" data-tip-key="tipProxyDomains">Always proxy domains</label>
+              <textarea id="proxyDomains" rows="8" data-i18n-placeholder="proxyDomainPlaceholder" placeholder="domain:claude.ai"></textarea>
+              <div id="autoProxyDomainsWrap" class="auto-rule-box" hidden>
+                <strong data-i18n="autoAddedRules">Automatically added</strong>
+                <pre id="autoProxyDomains" class="auto-rule-list"></pre>
+              </div>
+            </div>
+            <div>
+              <label class="help-label" data-i18n="directDomains" data-tip-key="tipDirectDomains">Always direct domains</label>
+              <textarea id="directDomains" rows="8" data-i18n-placeholder="directDomainPlaceholder" placeholder="domain:bank.example"></textarea>
+            </div>
+            <div>
+              <label class="help-label" data-i18n="proxyIps" data-tip-key="tipProxyIps">Always proxy IP/CIDR</label>
+              <textarea id="proxyIps" rows="5" data-i18n-placeholder="proxyIpPlaceholder" placeholder="geoip:telegram"></textarea>
+              <div id="autoProxyIpsWrap" class="auto-rule-box" hidden>
+                <strong data-i18n="autoAddedRules">Automatically added</strong>
+                <pre id="autoProxyIps" class="auto-rule-list"></pre>
+              </div>
+            </div>
+              <div>
+                <label class="help-label" data-i18n="directIps" data-tip-key="tipDirectIps">Always direct IP/CIDR</label>
+                <textarea id="directIps" rows="5" data-i18n-placeholder="directIpPlaceholder" placeholder="192.0.2.0/24"></textarea>
+              </div>
+            </div>
+            <div class="ports-row">
+              <label class="help-label" data-i18n="proxyPorts" data-tip-key="tipProxyPorts">Always proxy ports</label>
+              <input id="proxyPorts" data-i18n-placeholder="proxyPortsPlaceholder" placeholder="9339, 443">
+            </div>
+
+            <details class="advanced-settings">
+              <summary>
+                <span>
+                  <strong data-i18n="advancedSettings">Advanced system settings</strong>
+                  <small data-i18n="advancedSettingsHint">Transparent proxy internals and certificate paths</small>
+                </span>
+              </summary>
+              <div class="advanced-grid">
+                <div>
+                  <label class="help-label" data-i18n="tproxyPort" data-tip-key="tipTproxyPort">TPROXY port</label>
+                  <input id="tproxyPort" type="number" min="1" max="65535">
+                </div>
+                <div>
+                  <label class="help-label" data-i18n="tproxyMark" data-tip-key="tipTproxyMark">TPROXY mark</label>
+                  <input id="tproxyMark" placeholder="0x2333">
+                </div>
+              <div>
+                <label class="help-label" data-i18n="tproxyTable" data-tip-key="tipTproxyTable">Table</label>
+                <input id="tproxyTable" type="number" min="1">
+              </div>
+              <div>
+                <label class="toggle help-label" id="mobikeWrap" data-tip-key="tipMobike"><input id="mobikeEnabled" type="checkbox"> <span data-i18n="mobikeEnabled">MOBIKE</span></label>
+              </div>
+              <div>
+                <label class="help-label" data-i18n="certFile" data-tip-key="tipCertFile">IPsec certificate</label>
+                <input id="certFile" data-i18n-placeholder="certPlaceholder" placeholder="/etc/swanctl/x509/fullchain.pem">
+              </div>
+                <div>
+                  <label class="help-label" data-i18n="keyFile" data-tip-key="tipKeyFile">IPsec private key</label>
+                  <input id="keyFile" data-i18n-placeholder="keyPlaceholder" placeholder="/etc/swanctl/private/key.pem">
+                </div>
+              </div>
+            </details>
+          </section>
+
+          <section class="panel panel-main clients-panel">
+            <div class="section-title">
+              <h2 data-i18n="ipsecClients">IPsec clients</h2>
+              <div class="section-actions">
+                <button type="button" id="resetTrafficBtn" class="ghost" data-i18n="resetTraffic">Reset traffic</button>
+                <button type="button" id="addUserBtn" class="ghost" data-i18n="addUser">Add user</button>
+              </div>
+            </div>
+            <div id="users" class="user-list"></div>
+          </section>
+        </form>
+
+        <details class="panel docs-panel" id="docsPanel">
+          <summary>
+            <span>
+              <strong data-i18n="documentation">Documentation</strong>
+              <small data-i18n="documentationHint">Deployment, DNS, certificates and client setup</small>
+            </span>
+          </summary>
+          <article id="docsBody" class="docs-body"></article>
+        </details>
+      </div>
+
+      <aside class="panel side">
+        <div class="section-title">
+          <h2 data-i18n="hostStatus">Host status</h2>
+          <button type="button" id="refreshStatus" class="ghost" data-i18n="refresh">Refresh</button>
+        </div>
+        <label class="toggle auto-refresh"><input id="autoRefresh" type="checkbox" checked> <span data-i18n="autoRefresh">Auto refresh</span></label>
+        <pre id="statusBox" data-i18n="noStatus">No status yet</pre>
+        <details class="activity-panel" id="activityPanel">
+          <summary>
+            <div class="section-title"><h2 data-i18n="activityLog">Activity log</h2></div>
+            <small id="logCount">0</small>
+          </summary>
+          <div id="logBox" class="log-list" data-i18n="noLogs">No logs yet</div>
+        </details>
+      </aside>
+    </section>
+  </main>
+  <aside class="pending-bar" id="pendingBar" hidden>
+    <div class="pending-copy">
+      <strong data-i18n="pendingChangesTitle">Changes pending</strong>
+      <span id="pendingMessage" data-i18n="pendingChangesMessage">Review the draft and apply it to the host, or discard it.</span>
+    </div>
+    <div class="pending-actions">
+      <button type="button" id="discardBtn" class="ghost" data-i18n="discardChanges">Discard</button>
+      <button type="button" id="pendingApplyBtn" class="primary" data-i18n="applyToHost">Apply</button>
+    </div>
+  </aside>
+  <div id="tooltip" role="tooltip"></div>
+  <script src="/i18n.js"></script>
+  <script src="/app.js"></script>
+</body>
+</html>

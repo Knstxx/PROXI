@@ -1,5 +1,5 @@
 dev-state.json
-vpnproxi
+/vpnproxi
 *.log
 *.tmp
 .DS_Store
