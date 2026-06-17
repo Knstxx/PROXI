@@ -128,4 +128,13 @@ func TestSwanctlMobikeFlagFollowsState(t *testing.T) {
 	if !strings.Contains(enabled, "mobike = yes") {
 		t.Fatalf("swanctl config must enable MOBIKE when the flag is on: %s", enabled)
 	}
+	if !strings.Contains(enabled, "dpd_delay = 0s") {
+		t.Fatalf("swanctl config must not actively probe idle mobile clients: %s", enabled)
+	}
+	if !strings.Contains(enabled, "dpd_action = clear") {
+		t.Fatalf("swanctl config must clear stale child SAs instead of trapping them: %s", enabled)
+	}
+	if !strings.Contains(enabled, "unique = replace") {
+		t.Fatalf("swanctl config must replace stale mobile sessions: %s", enabled)
+	}
 }

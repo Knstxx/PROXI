@@ -213,10 +213,10 @@ func writeSwanctlConnection(b *strings.Builder, name, localID, certFile, updownP
 		mobike = "yes"
 	}
 	fmt.Fprintf(b, "  %s {\n", name)
-	fmt.Fprintf(b, "    local_addrs = %%any\n    version = 2\n    fragmentation = yes\n    mobike = %s\n    dpd_delay = 300s\n    proposals = %s\n    send_cert = always\n    pools = vpn-pool\n    unique = never\n", mobike, ikeProposals)
+	fmt.Fprintf(b, "    local_addrs = %%any\n    version = 2\n    fragmentation = yes\n    mobike = %s\n    dpd_delay = 0s\n    proposals = %s\n    send_cert = always\n    pools = vpn-pool\n    unique = replace\n", mobike, ikeProposals)
 	fmt.Fprintf(b, "    local { auth = pubkey\n      certs = %s\n      id = %s\n    }\n", certFile, localID)
 	fmt.Fprintf(b, "    remote { auth = eap-mschapv2\n      eap_id = %%any\n      id = %%any\n    }\n")
-	fmt.Fprintf(b, "    children { net { local_ts = 0.0.0.0/0\n      esp_proposals = %s\n      updown = %s\n      rekey_time = 48h\n      dpd_action = trap\n    } }\n", espProposals, updownPath)
+	fmt.Fprintf(b, "    children { net { local_ts = 0.0.0.0/0\n      esp_proposals = %s\n      updown = %s\n      rekey_time = 48h\n      dpd_action = clear\n    } }\n", espProposals, updownPath)
 	fmt.Fprintf(b, "  }\n")
 }
 
