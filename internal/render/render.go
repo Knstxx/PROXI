@@ -99,15 +99,11 @@ func XrayConfig(state core.State) ([]byte, error) {
 	inbounds = append(inbounds, map[string]any{"tag": "api", "listen": "127.0.0.1", "port": 10085, "protocol": "dokodemo-door", "settings": map[string]any{"address": "127.0.0.1"}})
 	config := map[string]any{
 		"log":      map[string]any{"loglevel": "warning", "access": "/var/log/xray/access.log", "error": "/var/log/xray/error.log"},
-		"api":      map[string]any{"tag": "api", "services": []string{"HandlerService", "RoutingService", "StatsService", "ObservatoryService"}},
+		"api":      map[string]any{"tag": "api", "services": []string{"HandlerService", "RoutingService", "StatsService"}},
 		"policy":   map[string]any{"system": map[string]any{"statsInboundUplink": true, "statsInboundDownlink": true, "statsOutboundUplink": true, "statsOutboundDownlink": true}},
 		"stats":    map[string]any{},
 		"routing":  map[string]any{"domainStrategy": "IPIfNonMatch", "rules": rules},
 		"inbounds": inbounds, "outbounds": outbounds,
-		"burstObservatory": map[string]any{
-			"subjectSelector": []string{"proxy-"},
-			"pingConfig":      map[string]any{"destination": "https://connectivitycheck.gstatic.com/generate_204", "interval": "1m", "sampling": 5, "timeout": "5s"},
-		},
 	}
 	return json.MarshalIndent(config, "", "  ")
 }

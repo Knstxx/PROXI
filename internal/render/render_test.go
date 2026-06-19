@@ -50,6 +50,9 @@ func TestXrayConfigContainsTransparentInboundAndOutboundMark(t *testing.T) {
 	if _, ok := cfg["stats"].(map[string]any); !ok {
 		t.Fatalf("xray stats must be enabled: %#v", cfg)
 	}
+	if _, ok := cfg["burstObservatory"]; ok {
+		t.Fatalf("single-outbound configs must not run xray burst observatory probes: %#v", cfg["burstObservatory"])
+	}
 	routing := cfg["routing"].(map[string]any)
 	rules := routing["rules"].([]any)
 	firstRule := rules[0].(map[string]any)
