@@ -54,7 +54,7 @@ func DefaultState() State {
 			VPNSubnet:      "10.10.10.0/24",
 			VPNDNSServers:  []string{"8.8.8.8", "1.1.1.1"},
 			MobikeEnabled:  false,
-			CertFile:       "/etc/swanctl/x509/vpnproxi-full.crt",
+			CertFile:       "/etc/swanctl/x509/vpnproxi-leaf.crt",
 			KeyFile:        "/etc/swanctl/private/vpnproxi.key",
 			CAFile:         "/etc/swanctl/x509ca/vpnproxi-ca.crt",
 			XrayConfigPath: "/usr/local/etc/xray/config.json",

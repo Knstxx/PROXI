@@ -66,7 +66,7 @@ VPNproxi uses two certificate paths:
 - UI HTTPS is handled by Caddy when the installer runs with `--domain`.
 - IPsec identity is handled by StrongSwan using `IPsec certificate` and `IPsec private key`.
 
-The installer generates a local CA and an IPsec server certificate with the provided domain as SAN. Clients must trust `/etc/swanctl/x509ca/vpnproxi-ca.crt` or use a certificate chain that your client devices already trust.
+The installer generates a local CA and an IPsec server certificate with the provided domain as SAN. Clients must trust `/etc/swanctl/x509ca/vpnproxi-ca.crt` or use a certificate chain that your client devices already trust. If `IPsec certificate` points to a fullchain bundle, Apply splits it into a leaf certificate for StrongSwan and intermediate certificates under `/etc/swanctl/x509ca`.
 
 ## UI access
 

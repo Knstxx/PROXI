@@ -2,6 +2,8 @@ package system
 
 import (
 	"bytes"
+	"context"
+	"encoding/pem"
 	"fmt"
 	"os"
 	"os/exec"
@@ -22,11 +24,17 @@ type Result struct {
 }
 
 func Apply(state core.State) (Result, error) {
+	var res Result
+	normalizedState, certFiles, err := prepareSwanctlCertificate(state)
+	if err != nil {
+		return res, err
+	}
+	state = normalizedState
 	bundle, err := render.Build(state)
 	if err != nil {
 		return Result{}, err
 	}
-	var res Result
+	res.ChangedFiles = append(res.ChangedFiles, certFiles...)
 	writes := []struct {
 		path string
 		data []byte
@@ -60,7 +68,7 @@ func Apply(state core.State) (Result, error) {
 	if err := runRequired(&res, "systemctl", "enable", "--now", "vpnproxi-geodata.timer"); err != nil {
 		return res, err
 	}
-	if err := runRequired(&res, "xray", "run", "-test", "-config", state.Server.XrayConfigPath); err != nil {
+	if err := validateXrayConfig(&res, state.Server.XrayConfigPath); err != nil {
 		return res, err
 	}
 	if err := runRequired(&res, "systemctl", "restart", "xray"); err != nil {
@@ -149,6 +157,65 @@ func atomicWrite(path string, data []byte, mode os.FileMode) error {
 	return os.Rename(tmp, path)
 }
 
+func prepareSwanctlCertificate(state core.State) (core.State, []string, error) {
+	if state.Server.CertFile == "" {
+		return state, nil, nil
+	}
+	data, err := os.ReadFile(state.Server.CertFile)
+	if err != nil {
+		return state, nil, err
+	}
+	certs := splitPEMCertificates(data)
+	if len(certs) <= 1 {
+		return state, nil, nil
+	}
+
+	certDir := filepath.Dir(state.Server.CertFile)
+	caDir := filepath.Dir(state.Server.CAFile)
+	if caDir == "." || caDir == string(filepath.Separator) || caDir == "" {
+		caDir = "/etc/swanctl/x509ca"
+	}
+	leafPath := filepath.Join(certDir, certificateStem(state.Server.CertFile)+"-leaf.crt")
+	if err := atomicWrite(leafPath, certs[0], 0o644); err != nil {
+		return state, nil, err
+	}
+	changed := []string{leafPath}
+	for i, cert := range certs[1:] {
+		path := filepath.Join(caDir, fmt.Sprintf("%s-intermediate-%d.crt", certificateStem(state.Server.CertFile), i+1))
+		if err := atomicWrite(path, cert, 0o644); err != nil {
+			return state, changed, err
+		}
+		changed = append(changed, path)
+	}
+	state.Server.CertFile = leafPath
+	return state, changed, nil
+}
+
+func splitPEMCertificates(data []byte) [][]byte {
+	var certs [][]byte
+	rest := data
+	for {
+		block, next := pem.Decode(rest)
+		if block == nil {
+			return certs
+		}
+		if block.Type == "CERTIFICATE" {
+			certs = append(certs, pem.EncodeToMemory(block))
+		}
+		rest = next
+	}
+}
+
+func certificateStem(path string) string {
+	base := filepath.Base(path)
+	for _, suffix := range []string{"-fullchain.pem", "-fullchain.crt", "-full.crt", ".pem", ".crt"} {
+		if strings.HasSuffix(base, suffix) {
+			return strings.TrimSuffix(base, suffix)
+		}
+	}
+	return strings.TrimSuffix(base, filepath.Ext(base))
+}
+
 func mustRun(name string, args ...string) []string {
 	cmd := exec.Command(name, args...)
 	_ = cmd.Run()
@@ -187,6 +254,49 @@ func runRequired(res *Result, name string, args ...string) error {
 		message = err.Error()
 	}
 	return fmt.Errorf("%s failed: %s", commandLine(name, args...), message)
+}
+
+func runRequiredTimeout(res *Result, timeout time.Duration, name string, args ...string) error {
+	res.Commands = append(res.Commands, commandLine(name, args...))
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, name, args...)
+	out, err := cmd.CombinedOutput()
+	if ctx.Err() == context.DeadlineExceeded {
+		return fmt.Errorf("%s timed out after %s", commandLine(name, args...), timeout)
+	}
+	if err == nil {
+		return nil
+	}
+	message := strings.TrimSpace(string(out))
+	if message == "" {
+		message = err.Error()
+	}
+	return fmt.Errorf("%s failed: %s", commandLine(name, args...), message)
+}
+
+func validateXrayConfig(res *Result, configPath string) error {
+	const validateTimeout = 15 * time.Second
+
+	help, err := exec.Command("xray", "help", "run").CombinedOutput()
+	res.Commands = append(res.Commands, "xray help run")
+	if err != nil {
+		res.Warnings = append(res.Warnings, fmt.Sprintf("xray help run failed: %s", strings.TrimSpace(string(help))))
+		return nil
+	}
+	if !strings.Contains(string(help), "-test") {
+		res.Warnings = append(res.Warnings, "installed Xray does not support run -test; skipping pre-restart validation")
+		return nil
+	}
+	if err := runRequiredTimeout(res, validateTimeout, "xray", "run", "-test", "-config", configPath); err != nil {
+		if strings.Contains(err.Error(), "timed out after") {
+			res.Warnings = append(res.Warnings, err.Error())
+			return nil
+		}
+		return err
+	}
+	return nil
 }
 
 func commandText(name string, args ...string) string {

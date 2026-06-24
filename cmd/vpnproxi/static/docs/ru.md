@@ -66,7 +66,7 @@ VPNproxi управляет gateway, а не внешним exit-node.
 - HTTPS для UI обслуживает Caddy, если installer запущен с `--domain`.
 - IPsec identity обслуживает StrongSwan через поля `IPsec certificate` и `IPsec private key`.
 
-Installer генерирует локальный CA и серверный IPsec-сертификат с доменом в SAN. Клиенты должны доверять `/etc/swanctl/x509ca/vpnproxi-ca.crt`, либо нужно использовать цепочку сертификатов, которой клиентские устройства уже доверяют.
+Installer генерирует локальный CA и серверный IPsec-сертификат с доменом в SAN. Клиенты должны доверять `/etc/swanctl/x509ca/vpnproxi-ca.crt`, либо нужно использовать цепочку сертификатов, которой клиентские устройства уже доверяют. Если `IPsec certificate` указывает на fullchain bundle, Apply разделит его на leaf-сертификат для StrongSwan и intermediate-сертификаты в `/etc/swanctl/x509ca`.
 
 ## Доступ к UI
 

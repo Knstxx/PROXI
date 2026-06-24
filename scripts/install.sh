@@ -42,7 +42,7 @@ install -d -m 0700 /etc/swanctl/private
 install -d -m 0755 /etc/swanctl/x509 /etc/swanctl/x509ca
 
 CERT_NAME="${DOMAIN:-vpnproxi.local}"
-if [[ ! -f /etc/swanctl/private/vpnproxi.key || ! -f /etc/swanctl/x509/vpnproxi-full.crt || ! -f /etc/swanctl/x509ca/vpnproxi-ca.crt ]]; then
+if [[ ! -f /etc/swanctl/private/vpnproxi.key || ! -f /etc/swanctl/x509/vpnproxi-leaf.crt || ! -f /etc/swanctl/x509ca/vpnproxi-ca.crt ]]; then
   WORKDIR="$(mktemp -d)"
   trap 'rm -rf "$WORKDIR"' EXIT
   pki --gen --type rsa --size 4096 --outform pem > "$WORKDIR/ca.key.pem"
@@ -56,6 +56,7 @@ if [[ ! -f /etc/swanctl/private/vpnproxi.key || ! -f /etc/swanctl/x509/vpnproxi-
       --flag serverAuth --flag ikeIntermediate --outform pem \
       > "$WORKDIR/server.cert.pem"
   install -m 0600 "$WORKDIR/server.key.pem" /etc/swanctl/private/vpnproxi.key
+  install -m 0644 "$WORKDIR/server.cert.pem" /etc/swanctl/x509/vpnproxi-leaf.crt
   install -m 0644 "$WORKDIR/server.cert.pem" /etc/swanctl/x509/vpnproxi-full.crt
   install -m 0644 "$WORKDIR/ca.cert.pem" /etc/swanctl/x509ca/vpnproxi-ca.crt
 fi
