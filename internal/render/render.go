@@ -498,13 +498,16 @@ DNSMASQ
 %s
 DNSROUTES
   if [[ "$LOAD_RUNET_DOMAIN_LIST" == "1" && -r "$GEODATA_DIR/ru-blocked-all.txt" ]]; then
-    while IFS= read -r rule; do
-      domain="${rule#domain:}"
-      domain="${domain#full:}"
-      [[ -z "$domain" || "$domain" == regexp:* || "$domain" == geosite:* ]] && continue
-      [[ "$domain" =~ ^[A-Za-z0-9._*-]+$ ]] || continue
-      printf 'ipset=/%%s/%%s\n' "$domain" "$PROXY_SET" >>/usr/local/etc/vpnproxi/dnsmasq-routes.conf
-    done <"$GEODATA_DIR/ru-blocked-all.txt"
+    awk -v set="$PROXY_SET" '
+      /^domain:/ || /^full:/ {
+        domain = $0
+        sub(/^domain:/, "", domain)
+        sub(/^full:/, "", domain)
+        if (domain != "" && domain !~ /^regexp:/ && domain !~ /^geosite:/ && domain ~ /^[A-Za-z0-9._*-]+$/) {
+          printf "ipset=/%%s/%%s\n", domain, set
+        }
+      }
+    ' "$GEODATA_DIR/ru-blocked-all.txt" >>/usr/local/etc/vpnproxi/dnsmasq-routes.conf
   fi
   cat >/etc/systemd/system/vpnproxi-dnsmasq.service <<'DNSMASQ_SERVICE'
 [Unit]
@@ -625,17 +628,33 @@ tmp_geosite=$(mktemp)
 cleanup(){ rm -f "$tmp_geoip" "$tmp_geosite"; }
 trap cleanup EXIT
 CURL_FLAGS=(--fail --location --silent --show-error --connect-timeout 30 --max-time 300 --retry 3 --retry-delay 3)
+LIST_MAX_AGE_SECONDS=$((20 * 60 * 60))
+is_fresh() {
+  local path="$1"
+  local now
+  local mtime
+  [[ -r "$path" ]] || return 1
+  now=$(date +%%s)
+  mtime=$(stat -c %%Y "$path" 2>/dev/null || echo 0)
+  [[ "$mtime" =~ ^[0-9]+$ ]] || return 1
+  (( now >= mtime && now - mtime < LIST_MAX_AGE_SECONDS ))
+}
 if [[ "$DOWNLOAD_XRAY_DAT" == "1" ]]; then
-  curl "${CURL_FLAGS[@]}" -o "$tmp_geoip" "https://raw.githubusercontent.com/runetfreedom/russia-v2ray-rules-dat/release/geoip.dat"
-  curl "${CURL_FLAGS[@]}" -o "$tmp_geosite" "https://raw.githubusercontent.com/runetfreedom/russia-v2ray-rules-dat/release/geosite.dat"
-  install -m 0644 "$tmp_geoip" "$SHARE_DIR/geoip.dat"
-  install -m 0644 "$tmp_geosite" "$SHARE_DIR/geosite.dat"
-  systemctl restart xray 2>/dev/null || true
+  if ! is_fresh "$SHARE_DIR/geoip.dat" || ! is_fresh "$SHARE_DIR/geosite.dat"; then
+    curl "${CURL_FLAGS[@]}" -o "$tmp_geoip" "https://raw.githubusercontent.com/runetfreedom/russia-v2ray-rules-dat/release/geoip.dat"
+    curl "${CURL_FLAGS[@]}" -o "$tmp_geosite" "https://raw.githubusercontent.com/runetfreedom/russia-v2ray-rules-dat/release/geosite.dat"
+    install -m 0644 "$tmp_geoip" "$SHARE_DIR/geoip.dat"
+    install -m 0644 "$tmp_geosite" "$SHARE_DIR/geosite.dat"
+    systemctl restart xray 2>/dev/null || true
+  fi
 fi
 fetch_text_list() {
   local name="$1"
   local url="$2"
   local tmp
+  if is_fresh "$SHARE_DIR/$name"; then
+    return 0
+  fi
   tmp=$(mktemp)
   if curl "${CURL_FLAGS[@]}" -o "$tmp" "$url"; then
     install -m 0644 "$tmp" "$SHARE_DIR/$name"

@@ -95,6 +95,9 @@ func TestXrayConfigContainsTransparentInboundAndOutboundMark(t *testing.T) {
 	if !strings.Contains(firewall, `listen-address=$VPN_GATEWAY`) || !strings.Contains(firewall, `ipset=/whatismyipaddress.com/VPNPROXI_PROXY4`) {
 		t.Fatalf("selective firewall must configure dnsmasq/ipset domain routing: %s", firewall)
 	}
+	if !strings.Contains(firewall, `awk -v set="$PROXY_SET"`) || strings.Contains(firewall, `done <"$GEODATA_DIR/ru-blocked-all.txt"`) {
+		t.Fatalf("runet domain routing must be generated without a million-line bash loop: %s", firewall)
+	}
 	geodata := GeodataScript(state)
 	if !strings.Contains(firewall, `ru-blocked-all.txt`) || !strings.Contains(geodata, `russia-blocked-geosite/release/ru-blocked-all.txt`) {
 		t.Fatalf("runet blocked domains must feed dnsmasq/ipset routing")
@@ -107,6 +110,9 @@ func TestXrayConfigContainsTransparentInboundAndOutboundMark(t *testing.T) {
 	}
 	if !strings.Contains(geodata, `--connect-timeout 30`) || !strings.Contains(geodata, `--max-time 300`) || !strings.Contains(geodata, `--retry 3`) {
 		t.Fatalf("geodata downloads must tolerate first-time large list refreshes: %s", geodata)
+	}
+	if !strings.Contains(geodata, `LIST_MAX_AGE_SECONDS=$((20 * 60 * 60))`) || !strings.Contains(geodata, `is_fresh "$SHARE_DIR/$name"`) {
+		t.Fatalf("geodata downloads must skip fresh files during repeated apply: %s", geodata)
 	}
 	if !strings.Contains(firewall, `-d "$VPN_GATEWAY" -p udp --dport 53 -j ACCEPT`) {
 		t.Fatalf("selective firewall must allow client DNS to the local resolver: %s", firewall)
