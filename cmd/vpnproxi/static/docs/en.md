@@ -83,30 +83,45 @@ The link becomes the external Xray outbound. It is used only in `Selective Xray`
 Routing mode defines what happens to IPsec client traffic:
 
 - `Direct NAT` is the stable production mode. Traffic goes out through gateway NAT and Xray is not in the datapath.
-- `Selective Xray` sends only proxy-rule matches through the external outbound.
+- `Selective Xray` sends only proxy-rule matches through the external outbound. Linux firewall makes the decision through `ipset` and the project-scoped `vpnproxi-dnsmasq`, so normal direct traffic stays on kernel NAT and does not pass through Xray.
 - `Force Xray` sends all client traffic through the external outbound except explicit direct overrides. Local DNS stays direct so domain resolution remains stable.
 
 In `Selective Xray`, traffic goes through the external outbound when it matches proxy rules:
 
-- Always proxy domains
-- Always proxy IP/CIDR
+- Always proxy domains: `domain:` and `full:` rules
+- Always proxy IP/CIDR: literal IPv4 addresses, CIDR ranges, and supported runetfreedom-backed `geoip:` rules
 - Always proxy ports
 - Runet blocked list rules
+
+Selective mode does not evaluate arbitrary Xray `regexp:`, `geosite:` or `geoip:` categories because Xray is no longer the full traffic decision engine in this mode. Use explicit domains/IPs, the official runetfreedom text lists, or switch to `Force Xray` when arbitrary Xray categories are required.
 
 Direct rules override proxy rules. Use them for banks, private resources, internal networks, and anything that must stay local.
 
 ## Runet blocked list source
 
-When `Runet blocked lists` is enabled, VPNproxi adds Xray routing rules for `geosite:ru-blocked-all`, `geoip:ru-blocked`, `geoip:ru-blocked-community`, and `geoip:telegram`.
+When `Runet blocked lists` is enabled, VPNproxi uses the official runetfreedom release data. In `Selective Xray`, routing is driven by text domain/IP lists that can be consumed by `vpnproxi-dnsmasq` and kernel `ipset`. In `Force Xray`, VPNproxi also keeps `geosite.dat`/`geoip.dat` for Xray-compatible routing.
 
 This toggle uses runetfreedom blocked datasets and is refreshed by a systemd timer. The `Host status` panel shows the last successful update time of the loaded lists.
 
 Data files are updated by the generated systemd timer `vpnproxi-geodata.timer`. The timer runs `/usr/local/bin/vpnproxi-geodata-update.sh`, which downloads the latest release:
 
-- `geoip.dat` from `https://raw.githubusercontent.com/runetfreedom/russia-v2ray-rules-dat/release/geoip.dat`
-- `geosite.dat` from `https://raw.githubusercontent.com/runetfreedom/russia-v2ray-rules-dat/release/geosite.dat`
+- `ru-blocked.txt` from `https://raw.githubusercontent.com/runetfreedom/russia-blocked-geoip/release/text/ru-blocked.txt`
+- `ru-blocked-community.txt` from `https://raw.githubusercontent.com/runetfreedom/russia-blocked-geoip/release/text/ru-blocked-community.txt`
+- `telegram.txt` from `https://raw.githubusercontent.com/runetfreedom/russia-blocked-geoip/release/text/telegram.txt`
+- `ru-blocked-all.txt` from `https://raw.githubusercontent.com/runetfreedom/russia-blocked-geosite/release/ru-blocked-all.txt`
+- `geoip.dat` from `https://raw.githubusercontent.com/runetfreedom/russia-v2ray-rules-dat/release/geoip.dat` when `Force Xray` needs Xray categories
+- `geosite.dat` from `https://raw.githubusercontent.com/runetfreedom/russia-v2ray-rules-dat/release/geosite.dat` when `Force Xray` needs Xray categories
 
-The files are installed into `/usr/local/share/xray` and used by Xray as standard `geoip.dat` and `geosite.dat`.
+The files are installed into `/usr/local/share/xray`. Text IP lists are loaded into `VPNPROXI_PROXY4`; explicit proxy domain rules and `ru-blocked-all.txt` are added to that set through `vpnproxi-dnsmasq`.
+
+## Traffic statistics
+
+Client counters are accumulated in `/var/lib/vpnproxi/traffic.json`. The file is atomically rewritten and does not grow like a log.
+
+- `In ↓/↑` comes from kernel FORWARD counters for direct NAT traffic.
+- `Out ↓/↑` comes from Xray outbound counters for traffic sent to the external server.
+- Xray restarts, config applies, and host reboots should not clear accumulated values.
+- Values reset only through the `Reset traffic` button.
 
 ## Apply behavior
 

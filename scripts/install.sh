@@ -7,6 +7,7 @@ EMAIL=""
 VERSION_BIN="/usr/local/bin/vpnproxi"
 ENV_FILE="/etc/vpnproxi/vpnproxi.env"
 AUTH_FILE="/etc/vpnproxi/admin.json"
+TRAFFIC_FILE="/var/lib/vpnproxi/traffic.json"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -23,7 +24,7 @@ if [[ "$(id -u)" != "0" ]]; then
 fi
 
 apt-get update
-apt-get install -y curl ca-certificates openssl iproute2 iptables logrotate git golang-go ufw fail2ban unattended-upgrades \
+apt-get install -y curl ca-certificates openssl iproute2 iptables ipset dnsmasq-base logrotate git golang-go ufw fail2ban unattended-upgrades \
   strongswan-pki strongswan-swanctl charon-systemd \
   libstrongswan-standard-plugins libstrongswan-extra-plugins libcharon-extra-plugins
 
@@ -37,6 +38,7 @@ if ! command -v xray >/dev/null 2>&1; then
 fi
 
 install -d -m 0750 /etc/vpnproxi
+install -d -m 0750 /var/lib/vpnproxi
 install -d -m 0755 /usr/local/etc/vpnproxi
 install -d -m 0700 /etc/swanctl/private
 install -d -m 0755 /etc/swanctl/x509 /etc/swanctl/x509ca
@@ -65,6 +67,7 @@ if [[ ! -f "$ENV_FILE" ]]; then
   cat > "$ENV_FILE" <<EOF
 VPNPROXI_STATE=/etc/vpnproxi/state.json
 VPNPROXI_LOG=/var/log/vpnproxi/vpnproxi.log
+VPNPROXI_TRAFFIC=$TRAFFIC_FILE
 VPNPROXI_AUTH=$AUTH_FILE
 EOF
   chmod 0600 "$ENV_FILE"
@@ -74,6 +77,9 @@ if ! grep -q '^VPNPROXI_LOG=' "$ENV_FILE"; then
 fi
 if ! grep -q '^VPNPROXI_AUTH=' "$ENV_FILE"; then
   echo "VPNPROXI_AUTH=$AUTH_FILE" >> "$ENV_FILE"
+fi
+if ! grep -q '^VPNPROXI_TRAFFIC=' "$ENV_FILE"; then
+  echo "VPNPROXI_TRAFFIC=$TRAFFIC_FILE" >> "$ENV_FILE"
 fi
 
 cat > /etc/apt/apt.conf.d/20auto-upgrades <<'EOF'

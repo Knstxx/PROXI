@@ -83,30 +83,45 @@ Installer генерирует локальный CA и серверный IPsec
 Режим маршрутизации определяет, что происходит с трафиком IPsec-клиентов:
 
 - `Direct NAT` — стабильный production-режим. Трафик идет напрямую через шлюз с NAT, Xray не участвует в datapath.
-- `Selective Xray` — через внешний outbound уходит только трафик, совпавший с proxy-правилами.
+- `Selective Xray` — через внешний outbound уходит только трафик, совпавший с proxy-правилами. Решение принимает Linux firewall через `ipset` и отдельный `vpnproxi-dnsmasq`, поэтому обычный прямой трафик остается в kernel NAT и не проходит через Xray.
 - `Force Xray` — весь трафик клиента уходит через внешний outbound, кроме явных direct-исключений. Локальный DNS при этом остается прямым, чтобы не ломать резолвинг.
 
 В `Selective Xray` через внешний outbound трафик уходит при совпадении с proxy-правилами:
 
-- домены через внешний сервер
-- IP/CIDR через внешний сервер
+- домены через внешний сервер: правила `domain:` и `full:`
+- IP/CIDR через внешний сервер: явные IPv4-адреса, CIDR-диапазоны и поддержанные `geoip:` правила из runetfreedom
 - порты через внешний сервер
 - списки блокировок
+
+Selective-режим не исполняет произвольные Xray-категории `regexp:`, `geosite:` или `geoip:`, потому что Xray больше не является полным движком принятия решений для всего трафика. Используй явные домены/IP, официальные текстовые списки runetfreedom или переключайся в `Force Xray`, если нужны произвольные Xray-категории.
 
 Direct-правила имеют приоритет выше proxy-правил. Используй их для банков, внутренних ресурсов, приватных подсетей и всего, что должно оставаться локально.
 
 ## Источник списков блокировок
 
-При включенных `Списках блокировок` VPNproxi добавляет в маршрутизацию Xray правила `geosite:ru-blocked-all`, `geoip:ru-blocked`, `geoip:ru-blocked-community` и `geoip:telegram`.
+При включенных `Списках блокировок` VPNproxi использует официальные release-данные runetfreedom. В `Selective Xray` маршрутизация строится по текстовым доменным/IP-спискам, которые читают `vpnproxi-dnsmasq` и kernel `ipset`. В `Force Xray` VPNproxi дополнительно сохраняет `geosite.dat`/`geoip.dat` для Xray-совместимой маршрутизации.
 
 Эта галка использует blocked-датасеты runetfreedom и обновляется таймером systemd. В `Статус хоста` показывается время последнего обновления загруженных списков.
 
 Файлы данных обновляются сгенерированным таймером systemd `vpnproxi-geodata.timer`. Таймер запускает `/usr/local/bin/vpnproxi-geodata-update.sh`, который скачивает актуальные release-файлы:
 
-- `geoip.dat` из `https://raw.githubusercontent.com/runetfreedom/russia-v2ray-rules-dat/release/geoip.dat`
-- `geosite.dat` из `https://raw.githubusercontent.com/runetfreedom/russia-v2ray-rules-dat/release/geosite.dat`
+- `ru-blocked.txt` из `https://raw.githubusercontent.com/runetfreedom/russia-blocked-geoip/release/text/ru-blocked.txt`
+- `ru-blocked-community.txt` из `https://raw.githubusercontent.com/runetfreedom/russia-blocked-geoip/release/text/ru-blocked-community.txt`
+- `telegram.txt` из `https://raw.githubusercontent.com/runetfreedom/russia-blocked-geoip/release/text/telegram.txt`
+- `ru-blocked-all.txt` из `https://raw.githubusercontent.com/runetfreedom/russia-blocked-geosite/release/ru-blocked-all.txt`
+- `geoip.dat` из `https://raw.githubusercontent.com/runetfreedom/russia-v2ray-rules-dat/release/geoip.dat`, когда `Force Xray` нужны Xray-категории
+- `geosite.dat` из `https://raw.githubusercontent.com/runetfreedom/russia-v2ray-rules-dat/release/geosite.dat`, когда `Force Xray` нужны Xray-категории
 
-Файлы устанавливаются в `/usr/local/share/xray` и используются Xray как стандартные `geoip.dat` и `geosite.dat`.
+Файлы устанавливаются в `/usr/local/share/xray`. Текстовые IP-списки загружаются в `VPNPROXI_PROXY4`; явные доменные proxy-правила и доменный список `ru-blocked-all.txt` попадают в этот набор через `vpnproxi-dnsmasq`.
+
+## Статистика трафика
+
+Счётчики клиентов копятся в `/var/lib/vpnproxi/traffic.json`. Файл атомарно перезаписывается и не растёт как лог.
+
+- `In ↓/↑` берётся из kernel FORWARD-счётчиков для прямого NAT-трафика.
+- `Out ↓/↑` берётся из Xray outbound-счётчиков для трафика, который ушёл на внешний сервер.
+- Перезапуск Xray, применение конфигурации и перезагрузка сервера не должны обнулять накопленные значения.
+- Значения сбрасываются только кнопкой `Сбросить трафик`.
 
 ## Что делает Применить
 

@@ -68,6 +68,11 @@ func Apply(state core.State) (Result, error) {
 	if err := runRequired(&res, "systemctl", "enable", "--now", "vpnproxi-geodata.timer"); err != nil {
 		return res, err
 	}
+	if state.Routes.UseRunetGeodata {
+		if err := runRequired(&res, "/usr/local/bin/vpnproxi-geodata-update.sh"); err != nil {
+			return res, err
+		}
+	}
 	if err := validateXrayConfig(&res, state.Server.XrayConfigPath); err != nil {
 		return res, err
 	}
@@ -95,17 +100,31 @@ func Status() map[string]any {
 		}
 	}
 	return map[string]any{
-		"platform":       runtime.GOOS,
-		"xray":           commandText("systemctl", "is-active", "xray"),
-		"strongswan":     commandText("systemctl", "is-active", "strongswan"),
-		"swanSAs":        commandText("swanctl", "--list-sas"),
-		"tproxyRules":    commandText("iptables", "-t", "mangle", "-S", "PREROUTING"),
-		"tproxyChain":    commandText("iptables", "-t", "mangle", "-S", "VPNPROXI_TPROXY"),
-		"tproxyCounters": commandText("iptables", "-t", "mangle", "-L", "VPNPROXI_TPROXY", "-v", "-n", "-x", "--line-numbers"),
-		"xrayStats":      commandText("xray", "api", "statsquery", "--server=127.0.0.1:10085", "-pattern", ""),
-		"redirectRules":  commandText("iptables", "-t", "nat", "-S", "VPNPROXI_REDIRECT"),
-		"natRules":       commandText("iptables", "-t", "nat", "-S", "POSTROUTING"),
-		"netDev":         commandText("cat", "/proc/net/dev"),
+		"platform":        runtime.GOOS,
+		"xray":            commandText("systemctl", "is-active", "xray"),
+		"strongswan":      commandText("systemctl", "is-active", "strongswan"),
+		"swanSAs":         commandText("swanctl", "--list-sas"),
+		"tproxyRules":     commandText("iptables", "-t", "mangle", "-S", "PREROUTING"),
+		"tproxyChain":     commandText("iptables", "-t", "mangle", "-S", "VPNPROXI_TPROXY"),
+		"tproxyCounters":  commandText("iptables", "-t", "mangle", "-L", "VPNPROXI_TPROXY", "-v", "-n", "-x", "--line-numbers"),
+		"forwardCounters": commandText("iptables-save", "-t", "mangle", "-c"),
+		"proxySet":        commandText("ipset", "list", "VPNPROXI_PROXY4"),
+		"directSet":       commandText("ipset", "list", "VPNPROXI_DIRECT4"),
+		"dnsmasq":         commandText("systemctl", "is-active", "vpnproxi-dnsmasq"),
+		"xrayStats":       commandText("xray", "api", "statsquery", "--server=127.0.0.1:10085", "-pattern", ""),
+		"redirectRules":   commandText("iptables", "-t", "nat", "-S", "VPNPROXI_REDIRECT"),
+		"natRules":        commandText("iptables", "-t", "nat", "-S", "POSTROUTING"),
+		"netDev":          commandText("cat", "/proc/net/dev"),
+	}
+}
+
+func TrafficSnapshot() map[string]string {
+	if runtime.GOOS != "linux" {
+		return map[string]string{}
+	}
+	return map[string]string{
+		"xrayStats":       commandText("xray", "api", "statsquery", "--server=127.0.0.1:10085", "-pattern", ""),
+		"forwardCounters": commandText("iptables-save", "-t", "mangle", "-c"),
 	}
 }
 
@@ -114,33 +133,88 @@ func ResetTraffic() error {
 		return fmt.Errorf("traffic reset is Linux-only")
 	}
 	var res Result
-	return runRequired(&res, "xray", "api", "statsquery", "--server=127.0.0.1:10085", "-pattern", "", "-reset")
+	if err := runRequired(&res, "xray", "api", "statsquery", "--server=127.0.0.1:10085", "-pattern", "", "-reset"); err != nil {
+		return err
+	}
+	_ = runRequired(&res, "iptables", "-t", "mangle", "-Z", "VPNPROXI_FORWARD")
+	_ = runRequired(&res, "iptables", "-t", "mangle", "-Z", "VPNPROXI_TPROXY")
+	return nil
 }
 
-func GeodataStatus(geodataDir string) map[string]any {
+func GeodataStatus(state core.State) map[string]any {
 	meta := map[string]any{
 		"geodataUpdatedAt": "",
 		"geodataStatus":    "missing",
 	}
-	geoipPath := filepath.Join(geodataDir, "geoip.dat")
-	geositePath := filepath.Join(geodataDir, "geosite.dat")
+	paths := geodataStatusPaths(state)
+	if len(paths) == 0 {
+		meta["geodataStatus"] = "disabled"
+		return meta
+	}
 	latest := time.Time{}
-	found := false
-	for _, path := range []string{geoipPath, geositePath} {
+	found := 0
+	for _, path := range paths {
 		info, err := os.Stat(path)
 		if err != nil {
 			continue
 		}
-		found = true
+		found++
 		if info.ModTime().After(latest) {
 			latest = info.ModTime()
 		}
 	}
-	if found {
+	if found > 0 {
 		meta["geodataStatus"] = "ready"
+		if found < len(paths) {
+			meta["geodataStatus"] = "partial"
+		}
 		meta["geodataUpdatedAt"] = latest.UTC().Format(time.RFC3339)
 	}
 	return meta
+}
+
+func geodataStatusPaths(state core.State) []string {
+	dir := state.Server.GeodataDir
+	needs := map[string]bool{}
+	if state.Routes.UseRunetGeodata {
+		needs["ru-blocked.txt"] = true
+		needs["ru-blocked-community.txt"] = true
+		needs["telegram.txt"] = true
+		needs["ru-blocked-all.txt"] = true
+		if state.Routes.Mode == "force_proxy" {
+			needs["geoip.dat"] = true
+			needs["geosite.dat"] = true
+		}
+	}
+	for _, value := range state.Routes.ProxyDomains {
+		if strings.EqualFold(strings.TrimSpace(value), "geosite:ru-blocked-all") {
+			needs["ru-blocked-all.txt"] = true
+			if state.Routes.Mode == "force_proxy" {
+				needs["geosite.dat"] = true
+			}
+		}
+	}
+	for _, value := range state.Routes.ProxyIPs {
+		switch strings.ToLower(strings.TrimSpace(value)) {
+		case "geoip:ru-blocked":
+			needs["ru-blocked.txt"] = true
+		case "geoip:ru-blocked-community":
+			needs["ru-blocked-community.txt"] = true
+		case "geoip:telegram":
+			needs["telegram.txt"] = true
+		}
+		if strings.HasPrefix(strings.ToLower(strings.TrimSpace(value)), "geoip:") && state.Routes.Mode == "force_proxy" {
+			needs["geoip.dat"] = true
+		}
+	}
+	order := []string{"ru-blocked.txt", "ru-blocked-community.txt", "telegram.txt", "ru-blocked-all.txt", "geoip.dat", "geosite.dat"}
+	paths := make([]string, 0, len(order))
+	for _, name := range order {
+		if needs[name] {
+			paths = append(paths, filepath.Join(dir, name))
+		}
+	}
+	return paths
 }
 
 func atomicWrite(path string, data []byte, mode os.FileMode) error {

@@ -46,12 +46,45 @@ func ValidateState(state State) error {
 			return err
 		}
 	}
+	if state.Routes.Mode == "selective" {
+		for _, v := range state.Routes.ProxyDomains {
+			if err := validateSelectiveProxyDomain(v); err != nil {
+				return err
+			}
+		}
+		for _, v := range state.Routes.ProxyIPs {
+			if err := validateSelectiveProxyIP(v); err != nil {
+				return err
+			}
+		}
+	}
 	for _, p := range state.Routes.ProxyPorts {
 		if p < 1 || p > 65535 {
 			return fmt.Errorf("proxy port out of range: %d", p)
 		}
 	}
 	return nil
+}
+
+func validateSelectiveProxyDomain(v string) error {
+	value := strings.ToLower(strings.TrimSpace(v))
+	if strings.HasPrefix(value, "domain:") || strings.HasPrefix(value, "full:") || value == "geosite:ru-blocked-all" {
+		return nil
+	}
+	return fmt.Errorf("selective mode cannot route %q before Xray; use domain:/full: rules, runetfreedom blocked lists, or Force Xray", v)
+}
+
+func validateSelectiveProxyIP(v string) error {
+	value := strings.ToLower(strings.TrimSpace(v))
+	if !strings.HasPrefix(value, "geoip:") {
+		return nil
+	}
+	switch value {
+	case "geoip:ru-blocked", "geoip:ru-blocked-community", "geoip:telegram":
+		return nil
+	default:
+		return fmt.Errorf("selective mode cannot route %q before Xray; use IP/CIDR rules, runetfreedom blocked lists, or Force Xray", v)
+	}
 }
 
 func validateUserName(v string) error {
@@ -72,13 +105,13 @@ func validateXrayDomain(v string) error {
 	if v == "" {
 		return fmt.Errorf("empty domain rule")
 	}
+	if strings.ContainsAny(v, " \t\r\n\"'`") {
+		return fmt.Errorf("invalid domain rule %q", v)
+	}
 	for _, p := range []string{"domain:", "full:", "regexp:", "geosite:"} {
 		if strings.HasPrefix(v, p) && len(v) > len(p) {
 			return nil
 		}
-	}
-	if strings.ContainsAny(v, " \t\r\n\"'`") {
-		return fmt.Errorf("invalid domain rule %q", v)
 	}
 	return nil
 }

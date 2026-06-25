@@ -27,12 +27,14 @@ External exit host:
 - `vpnproxi.service` - web UI and API.
 - `vpnproxi-apply.service` - reapplies firewall, Xray, and StrongSwan state on boot.
 - `strongswan` - IKEv2/IPsec endpoint.
-- `xray` - transparent receiver for the IPsec subnet and outbound proxy engine.
-- `vpnproxi-geodata.timer` - daily runetfreedom geosite/geoip update.
+- `xray` - transparent receiver for selected proxy traffic and external outbound engine.
+- `vpnproxi-dnsmasq` and `ipset` - project-scoped kernel-first selective routing helpers for domain/IP matches.
+- `vpnproxi-geodata.timer` - daily runetfreedom text-list update for Selective Xray, plus Xray `.dat` refresh when Force Xray uses those categories.
 
 ## Important Paths
 
 - `/etc/vpnproxi/state.json` - source of truth for UI state.
+- `/var/lib/vpnproxi/traffic.json` - persistent per-client traffic totals. It is atomically rewritten, not appended.
 - `/var/log/vpnproxi/vpnproxi.log` - VPNproxi activity log, rotated by size in-app and by `logrotate`.
 - `/var/log/xray/access.log` and `/var/log/xray/error.log` - Xray logs, rotated by `/etc/logrotate.d/vpnproxi-xray`.
 - `/usr/local/etc/xray/config.json` - generated Xray config.
@@ -43,10 +45,10 @@ External exit host:
 
 ## Traffic Counters
 
-- Per-client `In/Out` counters in the UI come from live Xray statistics. They are runtime memory counters and reset when:
-  - the operator presses `Reset traffic` in the UI;
-  - Xray restarts;
-  - the host reboots.
+- Per-client `In` counters come from kernel FORWARD counters for direct NAT traffic.
+- Per-client `Out` counters come from Xray outbound counters for traffic sent to the external proxy.
+- VPNproxi samples both sources and persists cumulative deltas in `/var/lib/vpnproxi/traffic.json`.
+- The counters survive Xray restarts, config applies, and host reboots. They reset only when the operator presses `Reset traffic` in the UI.
 - Host-level totals in `Host status` come from `/proc/net/dev`. These are kernel interface counters, not VPNproxi database values. They remain cumulative until reboot or interface reset.
 
 ## Health Checks

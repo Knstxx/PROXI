@@ -447,13 +447,20 @@ function updateRunetAutoRules() {
   domainWrap.hidden = !enabled;
   ipWrap.hidden = !enabled;
   if (!enabled) return;
-  $('autoProxyDomains').textContent = [
-    'geosite:ru-blocked-all',
-  ].join('\n');
+  if ($('routingMode').value === 'force_proxy') {
+    $('autoProxyDomains').textContent = 'geosite:ru-blocked-all';
+    $('autoProxyIps').textContent = [
+      'geoip:ru-blocked',
+      'geoip:ru-blocked-community',
+      'geoip:telegram',
+    ].join('\n');
+    return;
+  }
+  $('autoProxyDomains').textContent = 'ru-blocked-all.txt';
   $('autoProxyIps').textContent = [
-    'geoip:ru-blocked',
-    'geoip:ru-blocked-community',
-    'geoip:telegram',
+    'ru-blocked.txt',
+    'ru-blocked-community.txt',
+    'telegram.txt',
   ].join('\n');
 }
 
@@ -786,6 +793,7 @@ function renderStatus(data) {
     `${t('applyEnabled')}: ${data.applyEnabled ? t('enabled') : t('disabled')}`,
     `${t('xray')}: ${statusValue(data.xray)}`,
     `${t('strongswan')}: ${statusValue(data.strongswan)}`,
+    `dnsmasq: ${statusValue(data.dnsmasq)}`,
     `${t('routingMode')}: ${routingModeLabel(data.routingMode || serverState?.routes?.mode || 'direct')}`,
     `${t('geodataUpdated')}: ${formatGeodataUpdated(data)}`,
     '',
@@ -798,9 +806,17 @@ function renderStatus(data) {
     rows.push(`${item.name}: ${formatBytes(item.rx)} ↓ / ${formatBytes(item.tx)} ↑`);
   }
   rows.push('', `${t('gatewayRules')}: ${gatewayRulesSummary(data.tproxyChain || '', data.redirectRules || '')}`);
+  rows.push(`${t('kernelProxySet')}: ${ipsetSummary(data.proxySet || '')}`);
   rows.push('', `${t('ipsecSessions')}:`);
   rows.push(cleanSwanText(data.swanSAs || '') || t('noActiveSas'));
   return rows.join('\n');
+}
+
+function ipsetSummary(text) {
+  const members = String(text || '').match(/Number of entries:\s*(\d+)/);
+  if (members) return members[1];
+  const trimmed = String(text || '').trim();
+  return trimmed ? '-' : '0';
 }
 
 function statusValue(value) {

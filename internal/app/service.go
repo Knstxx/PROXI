@@ -16,6 +16,7 @@ import (
 type Options struct {
 	StatePath    string
 	LogPath      string
+	TrafficPath  string
 	StaticFS     fs.FS
 	ApplyEnabled bool
 	AdminToken   string
@@ -29,6 +30,8 @@ type Service struct {
 	adminToken   string
 	authStore    *AuthStore
 	activityLog  *ActivityLog
+	trafficStore *TrafficStore
+	stopTraffic  chan struct{}
 }
 
 func NewService(opts Options) (*Service, error) {
@@ -50,9 +53,15 @@ func NewService(opts Options) (*Service, error) {
 			return nil, errors.New("admin credentials are missing; create them with --create-admin or set VPNPROXI_ADMIN_TOKEN")
 		}
 	}
-	return &Service{
+	svc := &Service{
 		store: store, staticFS: opts.StaticFS, applyEnabled: opts.ApplyEnabled, adminToken: opts.AdminToken, authStore: authStore, activityLog: NewActivityLog(opts.LogPath),
-	}, nil
+		stopTraffic: make(chan struct{}),
+	}
+	if opts.ApplyEnabled && opts.TrafficPath != "" {
+		svc.trafficStore = NewTrafficStore(opts.TrafficPath)
+		go svc.trafficStore.Collect(5*time.Second, svc.stopTraffic)
+	}
+	return svc, nil
 }
 
 func (s *Service) Routes() http.Handler {
@@ -247,8 +256,13 @@ func (s *Service) statusHandler(w http.ResponseWriter, r *http.Request) {
 	status["applyEnabled"] = s.applyEnabled
 	if state, err := s.store.Load(); err == nil {
 		status["routingMode"] = state.Routes.Mode
-		for key, value := range system.GeodataStatus(state.Server.GeodataDir) {
+		for key, value := range system.GeodataStatus(state) {
 			status[key] = value
+		}
+		if s.trafficStore != nil {
+			if stats, err := s.trafficStore.Update(stringValue(status["xrayStats"]), stringValue(status["forwardCounters"])); err == nil {
+				status["xrayStats"] = stats
+			}
 		}
 	}
 	writeJSON(w, status, nil)
@@ -263,6 +277,13 @@ func (s *Service) resetTrafficHandler(w http.ResponseWriter, r *http.Request) {
 		s.activityLog.Event("traffic.reset.failed", "client traffic counters reset failed", map[string]any{"error": err.Error()})
 		writeError(w, http.StatusInternalServerError, err)
 		return
+	}
+	if s.trafficStore != nil {
+		if err := s.trafficStore.Reset(); err != nil {
+			s.activityLog.Event("traffic.reset.failed", "persistent traffic counters reset failed", map[string]any{"error": err.Error()})
+			writeError(w, http.StatusInternalServerError, err)
+			return
+		}
 	}
 	s.activityLog.Event("traffic.reset", "client traffic counters reset", nil)
 	writeJSON(w, map[string]any{"ok": true}, nil)
@@ -314,4 +335,13 @@ func writeError(w http.ResponseWriter, code int, err error) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
 	_ = json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+}
+
+func stringValue(value any) string {
+	switch v := value.(type) {
+	case string:
+		return strings.TrimSpace(v)
+	default:
+		return ""
+	}
 }

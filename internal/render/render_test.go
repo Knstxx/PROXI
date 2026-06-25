@@ -2,6 +2,9 @@ package render
 
 import (
 	"encoding/json"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -67,6 +70,38 @@ func TestXrayConfigContainsTransparentInboundAndOutboundMark(t *testing.T) {
 	if !strings.Contains(firewall, `-j TPROXY --on-port "$TPROXY_PORT"`) {
 		t.Fatalf("firewall TPROXY rule is missing: %s", firewall)
 	}
+	if !strings.Contains(firewall, `-m set --match-set "$PROXY_SET" dst -j TPROXY`) {
+		t.Fatalf("selective firewall must proxy only kernel-set matches: %s", firewall)
+	}
+	if strings.Contains(firewall, `ipset flush "$PROXY_SET"`) || strings.Contains(firewall, `ipset flush "$DIRECT_SET"`) {
+		t.Fatalf("firewall must not flush active ipsets referenced by live rules: %s", firewall)
+	}
+	if !strings.Contains(firewall, `ipset swap "$PROXY_SET_NEXT" "$PROXY_SET"`) || !strings.Contains(firewall, `ipset swap "$DIRECT_SET_NEXT" "$DIRECT_SET"`) {
+		t.Fatalf("firewall must atomically swap prepared ipsets into live names: %s", firewall)
+	}
+	if strings.Contains(firewall, `elif [[ "$MODE" == "selective" ]]; then
+  iptables -t mangle -A "$CHAIN" -s "$VPN_SUBNET" -p udp --dport 53 -j RETURN
+  iptables -t mangle -A "$CHAIN" -s "$VPN_SUBNET" -p tcp --dport 53 -j RETURN
+  iptables -t mangle -A "$CHAIN" -s "$VPN_SUBNET" -m set --match-set "$DIRECT_SET" dst -j RETURN
+  iptables -t mangle -A "$CHAIN" -s "$VPN_SUBNET" -p udp -j TPROXY`) {
+		t.Fatalf("selective firewall must not proxy all UDP traffic: %s", firewall)
+	}
+	if !strings.Contains(firewall, `listen-address=$VPN_GATEWAY`) || !strings.Contains(firewall, `ipset=/whatismyipaddress.com/VPNPROXI_PROXY4`) {
+		t.Fatalf("selective firewall must configure dnsmasq/ipset domain routing: %s", firewall)
+	}
+	geodata := GeodataScript(state)
+	if !strings.Contains(firewall, `ru-blocked-all.txt`) || !strings.Contains(geodata, `russia-blocked-geosite/release/ru-blocked-all.txt`) {
+		t.Fatalf("runet blocked domains must feed dnsmasq/ipset routing")
+	}
+	if !strings.Contains(firewall, `ru-blocked-community.txt`) || !strings.Contains(geodata, `russia-blocked-geoip/release/text/ru-blocked-community.txt`) {
+		t.Fatalf("runet community IP list must feed ipset routing")
+	}
+	if strings.Contains(geodata, `DOWNLOAD_XRAY_DAT="1"`) {
+		t.Fatalf("selective mode must not require Xray .dat files for blocked-list routing: %s", geodata)
+	}
+	if !strings.Contains(firewall, `-d "$VPN_GATEWAY" -p udp --dport 53 -j ACCEPT`) {
+		t.Fatalf("selective firewall must allow client DNS to the local resolver: %s", firewall)
+	}
 	if !strings.Contains(firewall, `ip rule add fwmark "$TPROXY_MARK" table "$TPROXY_TABLE"`) {
 		t.Fatalf("firewall policy route rule is missing: %s", firewall)
 	}
@@ -77,7 +112,7 @@ func TestXrayConfigContainsTransparentInboundAndOutboundMark(t *testing.T) {
 		t.Fatalf("firewall must not allow all VPN client traffic into local INPUT: %s", firewall)
 	}
 	if !strings.Contains(firewall, `-p udp -j TPROXY --on-port "$TPROXY_PORT"`) {
-		t.Fatalf("firewall must transparently capture UDP traffic as well: %s", firewall)
+		t.Fatalf("firewall force mode branch must transparently capture UDP traffic: %s", firewall)
 	}
 	if !strings.Contains(firewall, `net.core.rmem_max=16777216`) || !strings.Contains(firewall, `net.ipv4.tcp_mtu_probing=1`) {
 		t.Fatalf("firewall sysctl tuning for UDP buffers and MTU probing is missing: %s", firewall)
@@ -86,6 +121,14 @@ func TestXrayConfigContainsTransparentInboundAndOutboundMark(t *testing.T) {
 		t.Fatalf("firewall MSS clamping for VPN traffic is missing: %s", firewall)
 	}
 	updown := Updown(state)
+	if !strings.Contains(firewall, `FWD_CHAIN="VPNPROXI_FORWARD"`) || !strings.Contains(updown, `FWD_CHAIN="VPNPROXI_FORWARD"`) {
+		t.Fatalf("client traffic accounting must use a project-owned forward chain")
+	}
+	directSetAt := strings.LastIndex(updown, `--comment "vpnproxi user=$VPN_USER direct-set" -j RETURN`)
+	proxySetAt := strings.Index(updown, `--comment "vpnproxi user=$VPN_USER xray-set-udp"`)
+	if directSetAt < 0 || proxySetAt < 0 || directSetAt < proxySetAt {
+		t.Fatalf("per-user direct-set RETURN must be inserted after proxy rules in script so iptables -I gives it higher priority: %s", updown)
+	}
 	if strings.Contains(updown, `| grep -- "-s ${PLUTO_PEER_SOURCEIP}/32"`) {
 		t.Fatalf("updown cleanup must remove per-user rules explicitly instead of parsing iptables output: %s", updown)
 	}
@@ -118,6 +161,54 @@ func TestDirectModeDoesNotRequireOutbound(t *testing.T) {
 	}
 }
 
+func TestForceModeKeepsXrayDatForRunetRules(t *testing.T) {
+	state := core.DefaultState()
+	state.Routes.Mode = "force_proxy"
+	state.Routes.UseRunetGeodata = true
+	out, err := link.Parse("vless://11111111-2222-4333-8444-555555555555@example.com:443?type=tcp&security=none#node")
+	if err != nil {
+		t.Fatal(err)
+	}
+	state.Outbound = out
+
+	geodata := GeodataScript(state)
+	if !strings.Contains(geodata, `DOWNLOAD_XRAY_DAT="1"`) {
+		t.Fatalf("force mode must keep Xray .dat downloads for geosite/geoip routing: %s", geodata)
+	}
+	xray, err := XrayConfig(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(xray), `geoip:ru-blocked-community`) || !strings.Contains(string(xray), `geosite:ru-blocked-all`) {
+		t.Fatalf("force mode must render Xray runet categories: %s", xray)
+	}
+}
+
+func TestGeneratedShellScriptsHaveValidSyntax(t *testing.T) {
+	state := core.DefaultState()
+	state.Routes.Mode = "selective"
+	state.Server.Users = []core.VPNUser{{Login: "vpn_admin", Password: "change-me-now"}}
+	out, err := link.Parse("vless://11111111-2222-4333-8444-555555555555@example.com:443?type=tcp&security=none#node")
+	if err != nil {
+		t.Fatal(err)
+	}
+	state.Outbound = out
+
+	for name, script := range map[string]string{
+		"updown.sh":   Updown(state),
+		"firewall.sh": FirewallScript(state),
+		"geodata.sh":  GeodataScript(state),
+	} {
+		path := filepath.Join(t.TempDir(), name)
+		if err := os.WriteFile(path, []byte(script), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if out, err := exec.Command("bash", "-n", path).CombinedOutput(); err != nil {
+			t.Fatalf("%s has invalid bash syntax: %v\n%s", name, err, out)
+		}
+	}
+}
+
 func TestSwanctlMobikeFlagFollowsState(t *testing.T) {
 	state := core.DefaultState()
 	state.Server.MobikeEnabled = false
@@ -136,6 +227,9 @@ func TestSwanctlMobikeFlagFollowsState(t *testing.T) {
 	}
 	if !strings.Contains(enabled, "dpd_action = clear") {
 		t.Fatalf("swanctl config must clear stale child SAs instead of trapping them: %s", enabled)
+	}
+	if !strings.Contains(enabled, "close_action = start") {
+		t.Fatalf("swanctl config must restart a child SA closed by the peer: %s", enabled)
 	}
 	if !strings.Contains(enabled, "unique = replace") {
 		t.Fatalf("swanctl config must replace stale mobile sessions: %s", enabled)

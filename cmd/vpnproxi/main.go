@@ -20,6 +20,7 @@ func main() {
 	addr := flag.String("addr", ":8080", "HTTP listen address")
 	statePath := flag.String("state", defaultStatePath(), "state JSON path")
 	logPath := flag.String("log", defaultLogPath(), "activity log path")
+	trafficPath := flag.String("traffic", defaultTrafficPath(), "persistent traffic counters JSON path")
 	authPath := flag.String("auth", defaultAuthPath(), "admin credentials JSON path")
 	applyEnabled := flag.Bool("apply-enabled", true, "allow API to write system files and restart services")
 	createAdmin := flag.Bool("create-admin", false, "create or replace admin credentials and exit")
@@ -55,6 +56,7 @@ func main() {
 	svc, err := app.NewService(app.Options{
 		StatePath:    *statePath,
 		LogPath:      *logPath,
+		TrafficPath:  *trafficPath,
 		StaticFS:     staticFS,
 		ApplyEnabled: *applyEnabled,
 		AdminToken:   os.Getenv("VPNPROXI_ADMIN_TOKEN"),
@@ -69,7 +71,7 @@ func main() {
 		Handler:           svc.Routes(),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
-	log.Printf("vpnproxi listening on %s state=%s log=%s apply=%v", *addr, *statePath, *logPath, *applyEnabled)
+	log.Printf("vpnproxi listening on %s state=%s log=%s traffic=%s apply=%v", *addr, *statePath, *logPath, *trafficPath, *applyEnabled)
 	log.Fatal(server.ListenAndServe())
 }
 
@@ -85,6 +87,13 @@ func defaultLogPath() string {
 		return v
 	}
 	return "/var/log/vpnproxi/vpnproxi.log"
+}
+
+func defaultTrafficPath() string {
+	if v := os.Getenv("VPNPROXI_TRAFFIC"); v != "" {
+		return v
+	}
+	return "/var/lib/vpnproxi/traffic.json"
 }
 
 func defaultAuthPath() string {
