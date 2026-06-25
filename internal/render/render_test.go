@@ -73,17 +73,21 @@ func TestXrayConfigContainsTransparentInboundAndOutboundMark(t *testing.T) {
 	if !strings.Contains(firewall, `-m set --match-set "$PROXY_SET" dst -j TPROXY`) {
 		t.Fatalf("selective firewall must proxy only kernel-set matches: %s", firewall)
 	}
-	if strings.Contains(firewall, `ipset flush "$PROXY_SET"`) || strings.Contains(firewall, `ipset flush "$DIRECT_SET"`) {
-		t.Fatalf("firewall must not flush active ipsets referenced by live rules: %s", firewall)
-	}
 	if !strings.Contains(firewall, `ipset swap "$PROXY_SET_NEXT" "$PROXY_SET"`) || !strings.Contains(firewall, `ipset swap "$DIRECT_SET_NEXT" "$DIRECT_SET"`) {
 		t.Fatalf("firewall must atomically swap prepared ipsets into live names: %s", firewall)
+	}
+	preSwap := firewall[:strings.Index(firewall, `ipset swap "$PROXY_SET_NEXT" "$PROXY_SET"`)]
+	if strings.Contains(preSwap, `ipset flush "$PROXY_SET"`) || strings.Contains(preSwap, `ipset flush "$DIRECT_SET"`) {
+		t.Fatalf("firewall must not flush active ipsets referenced by live rules before atomic swap: %s", firewall)
 	}
 	if !strings.Contains(firewall, `ipset restore -exist <"$proxy_restore"`) || !strings.Contains(firewall, `ipset restore -exist <"$direct_restore"`) {
 		t.Fatalf("firewall must batch-load ipsets with ipset restore: %s", firewall)
 	}
 	if strings.Contains(firewall, `ipset add "$PROXY_SET_NEXT"`) || strings.Contains(firewall, `ipset add "$DIRECT_SET_NEXT"`) {
 		t.Fatalf("firewall must not load large ipsets with one ipset add process per entry: %s", firewall)
+	}
+	if !strings.Contains(firewall, `valid_ipv4_cidr "$cidr"`) || !strings.Contains(firewall, `10#$octet <= 255`) || !strings.Contains(firewall, `10#$mask <= 32`) {
+		t.Fatalf("firewall must strictly validate CIDRs before ipset restore: %s", firewall)
 	}
 	if strings.Contains(firewall, `elif [[ "$MODE" == "selective" ]]; then
   iptables -t mangle -A "$CHAIN" -s "$VPN_SUBNET" -p udp --dport 53 -j RETURN
@@ -173,6 +177,9 @@ func TestDirectModeDoesNotRequireOutbound(t *testing.T) {
 	}
 	if !strings.Contains(firewall, `-s "$VPN_SUBNET" -j RETURN`) {
 		t.Fatalf("direct firewall bypass is missing: %s", firewall)
+	}
+	if !strings.Contains(firewall, `ipset destroy "$PROXY_SET"`) || !strings.Contains(firewall, `ipset destroy "$DIRECT_SET"`) {
+		t.Fatalf("direct mode must clear stale selective ipsets: %s", firewall)
 	}
 }
 

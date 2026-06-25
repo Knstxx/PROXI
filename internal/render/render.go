@@ -441,12 +441,34 @@ if [[ "$MODE" != "direct" ]]; then
     printf 'flush %%s\n' "$DIRECT_SET_NEXT"
   } >"$direct_restore"
 
+  valid_ipv4_cidr() {
+    local value="$1"
+    local ip
+    local mask
+    local octet
+    local -a octets
+    [[ "$value" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}(/[0-9]{1,2})?$ ]] || return 1
+    ip="${value%%/*}"
+    mask="32"
+    if [[ "$value" == */* ]]; then
+      mask="${value##*/}"
+    fi
+    [[ "$mask" =~ ^[0-9]{1,2}$ ]] || return 1
+    (( 10#$mask <= 32 )) || return 1
+    IFS=. read -r -a octets <<<"$ip"
+    [[ "${#octets[@]}" -eq 4 ]] || return 1
+    for octet in "${octets[@]}"; do
+      [[ "$octet" =~ ^[0-9]{1,3}$ ]] || return 1
+      (( 10#$octet <= 255 )) || return 1
+    done
+  }
+
   append_ipset_entry() {
     local restore_file="$1"
     local set_name="$2"
     local cidr="$3"
     [[ -z "$cidr" ]] && return 0
-    [[ "$cidr" =~ ^[0-9]+(\.[0-9]+){3}(/[0-9]+)?$ ]] || return 0
+    valid_ipv4_cidr "$cidr" || return 0
     printf 'add %%s %%s -exist\n' "$set_name" "$cidr" >>"$restore_file"
   }
 
@@ -599,6 +621,15 @@ else
   iptables -t mangle -A "$CHAIN" -s "$VPN_SUBNET" -p udp -j TPROXY --on-port "$TPROXY_PORT" --tproxy-mark ${TPROXY_MARK}/0xffffffff
   iptables -t mangle -A "$CHAIN" -s "$VPN_SUBNET" -p tcp -j TPROXY --on-port "$TPROXY_PORT" --tproxy-mark ${TPROXY_MARK}/0xffffffff
   iptables -I INPUT 1 -s "$VPN_SUBNET" -m mark --mark ${TPROXY_MARK}/0xffffffff -j ACCEPT
+fi
+
+if [[ "$MODE" == "direct" ]] && command -v ipset >/dev/null 2>&1; then
+  ipset destroy "$PROXY_SET_NEXT" 2>/dev/null || true
+  ipset destroy "$DIRECT_SET_NEXT" 2>/dev/null || true
+  ipset flush "$PROXY_SET" 2>/dev/null || true
+  ipset flush "$DIRECT_SET" 2>/dev/null || true
+  ipset destroy "$PROXY_SET" 2>/dev/null || true
+  ipset destroy "$DIRECT_SET" 2>/dev/null || true
 fi
 
 iptables -t nat -C POSTROUTING -s "$VPN_SUBNET" -o "$WAN_IFACE" -j MASQUERADE 2>/dev/null \
