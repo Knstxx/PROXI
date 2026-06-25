@@ -56,9 +56,6 @@ func Apply(state core.State) (Result, error) {
 		}
 		res.ChangedFiles = append(res.ChangedFiles, w.path)
 	}
-	if err := runRequired(&res, "/usr/local/bin/vpnproxi-firewall.sh"); err != nil {
-		return res, err
-	}
 	if err := runRequired(&res, "systemctl", "daemon-reload"); err != nil {
 		return res, err
 	}
@@ -72,6 +69,8 @@ func Apply(state core.State) (Result, error) {
 		if err := runRequired(&res, "/usr/local/bin/vpnproxi-geodata-update.sh"); err != nil {
 			return res, err
 		}
+	} else if err := runRequired(&res, "/usr/local/bin/vpnproxi-firewall.sh"); err != nil {
+		return res, err
 	}
 	if err := validateXrayConfig(&res, state.Server.XrayConfigPath); err != nil {
 		return res, err
