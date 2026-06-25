@@ -79,6 +79,12 @@ func TestXrayConfigContainsTransparentInboundAndOutboundMark(t *testing.T) {
 	if !strings.Contains(firewall, `ipset swap "$PROXY_SET_NEXT" "$PROXY_SET"`) || !strings.Contains(firewall, `ipset swap "$DIRECT_SET_NEXT" "$DIRECT_SET"`) {
 		t.Fatalf("firewall must atomically swap prepared ipsets into live names: %s", firewall)
 	}
+	if !strings.Contains(firewall, `ipset restore -exist <"$proxy_restore"`) || !strings.Contains(firewall, `ipset restore -exist <"$direct_restore"`) {
+		t.Fatalf("firewall must batch-load ipsets with ipset restore: %s", firewall)
+	}
+	if strings.Contains(firewall, `ipset add "$PROXY_SET_NEXT"`) || strings.Contains(firewall, `ipset add "$DIRECT_SET_NEXT"`) {
+		t.Fatalf("firewall must not load large ipsets with one ipset add process per entry: %s", firewall)
+	}
 	if strings.Contains(firewall, `elif [[ "$MODE" == "selective" ]]; then
   iptables -t mangle -A "$CHAIN" -s "$VPN_SUBNET" -p udp --dport 53 -j RETURN
   iptables -t mangle -A "$CHAIN" -s "$VPN_SUBNET" -p tcp --dport 53 -j RETURN
@@ -98,6 +104,9 @@ func TestXrayConfigContainsTransparentInboundAndOutboundMark(t *testing.T) {
 	}
 	if strings.Contains(geodata, `DOWNLOAD_XRAY_DAT="1"`) {
 		t.Fatalf("selective mode must not require Xray .dat files for blocked-list routing: %s", geodata)
+	}
+	if !strings.Contains(geodata, `--connect-timeout 30`) || !strings.Contains(geodata, `--max-time 300`) || !strings.Contains(geodata, `--retry 3`) {
+		t.Fatalf("geodata downloads must tolerate first-time large list refreshes: %s", geodata)
 	}
 	if !strings.Contains(firewall, `-d "$VPN_GATEWAY" -p udp --dport 53 -j ACCEPT`) {
 		t.Fatalf("selective firewall must allow client DNS to the local resolver: %s", firewall)

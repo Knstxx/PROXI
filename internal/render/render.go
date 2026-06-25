@@ -421,41 +421,67 @@ if [[ "$MODE" != "direct" ]]; then
   command -v ipset >/dev/null 2>&1 || { echo "ipset is required for selective routing" >&2; exit 1; }
   command -v dnsmasq >/dev/null 2>&1 || { echo "dnsmasq is required for selective domain routing" >&2; exit 1; }
 fi
-ipset create "$PROXY_SET" hash:net family inet hashsize 65536 maxelem 1048576 -exist 2>/dev/null || true
-ipset create "$DIRECT_SET" hash:net family inet hashsize 1024 maxelem 65536 -exist 2>/dev/null || true
-ipset create "$PROXY_SET_NEXT" hash:net family inet hashsize 65536 maxelem 1048576 -exist
-ipset create "$DIRECT_SET_NEXT" hash:net family inet hashsize 1024 maxelem 65536 -exist
-ipset flush "$PROXY_SET_NEXT"
-ipset flush "$DIRECT_SET_NEXT"
+if [[ "$MODE" != "direct" ]]; then
+  ipset create "$PROXY_SET" hash:net family inet hashsize 65536 maxelem 1048576 -exist
+  ipset create "$DIRECT_SET" hash:net family inet hashsize 1024 maxelem 65536 -exist
+  ipset destroy "$PROXY_SET_NEXT" 2>/dev/null || true
+  ipset destroy "$DIRECT_SET_NEXT" 2>/dev/null || true
 
-cat <<'VPNPROXI_PROXY_CIDRS' | while IFS= read -r cidr; do
+  proxy_restore=$(mktemp)
+  direct_restore=$(mktemp)
+  cleanup_ipset_restore(){ rm -f "$proxy_restore" "$direct_restore"; }
+  trap cleanup_ipset_restore EXIT
+
+  {
+    printf 'create %%s hash:net family inet hashsize 65536 maxelem 1048576 -exist\n' "$PROXY_SET_NEXT"
+    printf 'flush %%s\n' "$PROXY_SET_NEXT"
+  } >"$proxy_restore"
+  {
+    printf 'create %%s hash:net family inet hashsize 1024 maxelem 65536 -exist\n' "$DIRECT_SET_NEXT"
+    printf 'flush %%s\n' "$DIRECT_SET_NEXT"
+  } >"$direct_restore"
+
+  append_ipset_entry() {
+    local restore_file="$1"
+    local set_name="$2"
+    local cidr="$3"
+    [[ -z "$cidr" ]] && return 0
+    [[ "$cidr" =~ ^[0-9]+(\.[0-9]+){3}(/[0-9]+)?$ ]] || return 0
+    printf 'add %%s %%s -exist\n' "$set_name" "$cidr" >>"$restore_file"
+  }
+
+  while IFS= read -r cidr; do
+    append_ipset_entry "$proxy_restore" "$PROXY_SET_NEXT" "$cidr"
+  done <<'VPNPROXI_PROXY_CIDRS'
 %s
 VPNPROXI_PROXY_CIDRS
-  [[ -z "$cidr" ]] && continue
-  ipset add "$PROXY_SET_NEXT" "$cidr" -exist 2>/dev/null || true
-done
-cat <<'VPNPROXI_DIRECT_CIDRS' | while IFS= read -r cidr; do
+
+  while IFS= read -r cidr; do
+    append_ipset_entry "$direct_restore" "$DIRECT_SET_NEXT" "$cidr"
+  done <<'VPNPROXI_DIRECT_CIDRS'
 %s
 VPNPROXI_DIRECT_CIDRS
-  [[ -z "$cidr" ]] && continue
-  ipset add "$DIRECT_SET_NEXT" "$cidr" -exist 2>/dev/null || true
-done
-if [[ "$MODE" != "direct" ]]; then
-  cat <<'VPNPROXI_PROXY_GEOIP_FILES' | while IFS= read -r name; do
-%s
-VPNPROXI_PROXY_GEOIP_FILES
+
+  while IFS= read -r name; do
     [[ -z "$name" ]] && continue
     file="$GEODATA_DIR/$name"
     [[ -r "$file" ]] || continue
     grep -E '^[0-9]+(\.[0-9]+){3}(/[0-9]+)?$' "$file" | while IFS= read -r cidr; do
-      ipset add "$PROXY_SET_NEXT" "$cidr" -exist 2>/dev/null || true
+      append_ipset_entry "$proxy_restore" "$PROXY_SET_NEXT" "$cidr"
     done
-  done
+  done <<'VPNPROXI_PROXY_GEOIP_FILES'
+%s
+VPNPROXI_PROXY_GEOIP_FILES
+
+  ipset restore -exist <"$proxy_restore"
+  ipset restore -exist <"$direct_restore"
+  ipset list "$PROXY_SET_NEXT" >/dev/null
+  ipset list "$DIRECT_SET_NEXT" >/dev/null
+  ipset swap "$PROXY_SET_NEXT" "$PROXY_SET"
+  ipset swap "$DIRECT_SET_NEXT" "$DIRECT_SET"
+  ipset destroy "$PROXY_SET_NEXT" 2>/dev/null || true
+  ipset destroy "$DIRECT_SET_NEXT" 2>/dev/null || true
 fi
-ipset swap "$PROXY_SET_NEXT" "$PROXY_SET"
-ipset swap "$DIRECT_SET_NEXT" "$DIRECT_SET"
-ipset destroy "$PROXY_SET_NEXT" 2>/dev/null || true
-ipset destroy "$DIRECT_SET_NEXT" 2>/dev/null || true
 
 if [[ "$MODE" != "direct" ]]; then
   install -d -m 0755 /usr/local/etc/vpnproxi
@@ -598,9 +624,10 @@ tmp_geoip=$(mktemp)
 tmp_geosite=$(mktemp)
 cleanup(){ rm -f "$tmp_geoip" "$tmp_geosite"; }
 trap cleanup EXIT
+CURL_FLAGS=(--fail --location --silent --show-error --connect-timeout 30 --max-time 300 --retry 3 --retry-delay 3)
 if [[ "$DOWNLOAD_XRAY_DAT" == "1" ]]; then
-  curl -fsSL --connect-timeout 10 --max-time 180 -o "$tmp_geoip" "https://raw.githubusercontent.com/runetfreedom/russia-v2ray-rules-dat/release/geoip.dat"
-  curl -fsSL --connect-timeout 10 --max-time 180 -o "$tmp_geosite" "https://raw.githubusercontent.com/runetfreedom/russia-v2ray-rules-dat/release/geosite.dat"
+  curl "${CURL_FLAGS[@]}" -o "$tmp_geoip" "https://raw.githubusercontent.com/runetfreedom/russia-v2ray-rules-dat/release/geoip.dat"
+  curl "${CURL_FLAGS[@]}" -o "$tmp_geosite" "https://raw.githubusercontent.com/runetfreedom/russia-v2ray-rules-dat/release/geosite.dat"
   install -m 0644 "$tmp_geoip" "$SHARE_DIR/geoip.dat"
   install -m 0644 "$tmp_geosite" "$SHARE_DIR/geosite.dat"
   systemctl restart xray 2>/dev/null || true
@@ -610,7 +637,7 @@ fetch_text_list() {
   local url="$2"
   local tmp
   tmp=$(mktemp)
-  if curl -fsSL --connect-timeout 10 --max-time 180 -o "$tmp" "$url"; then
+  if curl "${CURL_FLAGS[@]}" -o "$tmp" "$url"; then
     install -m 0644 "$tmp" "$SHARE_DIR/$name"
   elif [[ -r "$SHARE_DIR/$name" ]]; then
     echo "warning: failed to refresh $name, keeping existing file" >&2
