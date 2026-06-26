@@ -257,3 +257,16 @@ func TestSwanctlMobikeFlagFollowsState(t *testing.T) {
 		t.Fatalf("swanctl config must replace stale mobile sessions: %s", enabled)
 	}
 }
+
+func TestSwanctlPoolExcludesGatewayAddress(t *testing.T) {
+	state := core.DefaultState()
+	state.Server.VPNSubnet = "10.10.10.0/24"
+
+	got := Swanctl(state)
+	if !strings.Contains(got, "vpn-pool { addrs = 10.10.10.2-10.10.10.254") {
+		t.Fatalf("swanctl pool must not lease the local gateway address: %s", got)
+	}
+	if strings.Contains(got, "vpn-pool { addrs = 10.10.10.0/24") {
+		t.Fatalf("swanctl pool must not use the whole subnet as lease range: %s", got)
+	}
+}

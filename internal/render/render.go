@@ -1,6 +1,7 @@
 package render
 
 import (
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -211,7 +212,7 @@ func Swanctl(state core.State) string {
 	fmt.Fprintf(&b, "\n")
 	writeSwanctlConnection(&b, "ikev2-eap-any", "%any", certFile, state.Server.UpdownPath, state.Server.MobikeEnabled)
 	fmt.Fprintf(&b, "}\n\n")
-	fmt.Fprintf(&b, "pools {\n  vpn-pool { addrs = %s\n    dns = %s\n  }\n}\n\n", state.Server.VPNSubnet, strings.Join(vpnDNSServers(state), ", "))
+	fmt.Fprintf(&b, "pools {\n  vpn-pool { addrs = %s\n    dns = %s\n  }\n}\n\n", vpnPoolAddrs(state.Server.VPNSubnet), strings.Join(vpnDNSServers(state), ", "))
 	fmt.Fprintf(&b, "secrets {\n")
 	for _, user := range state.Server.Users {
 		fmt.Fprintf(&b, "  eap-%s {\n    id = %s\n    secret = %q\n  }\n", user.Login, user.Login, user.Password)
@@ -760,6 +761,38 @@ func vpnGatewayIP(cidr string) string {
 		return ""
 	}
 	return gateway.String()
+}
+
+func vpnPoolAddrs(cidr string) string {
+	_, ipNet, err := net.ParseCIDR(cidr)
+	if err != nil {
+		return cidr
+	}
+	networkIP := ipNet.IP.To4()
+	if networkIP == nil {
+		return cidr
+	}
+	ones, bits := ipNet.Mask.Size()
+	if bits != 32 || ones < 0 || ones > 30 {
+		return cidr
+	}
+	size := uint64(1) << uint(32-ones)
+	network := uint64(binary.BigEndian.Uint32(networkIP))
+	first := network + 2
+	last := network + size - 2
+	if first > last || last > uint64(^uint32(0)) {
+		return cidr
+	}
+	if first == last {
+		return ipv4FromUint32(uint32(first))
+	}
+	return fmt.Sprintf("%s-%s", ipv4FromUint32(uint32(first)), ipv4FromUint32(uint32(last)))
+}
+
+func ipv4FromUint32(value uint32) string {
+	var raw [4]byte
+	binary.BigEndian.PutUint32(raw[:], value)
+	return net.IP(raw[:]).String()
 }
 
 func staticCIDRRules(values []string) []string {
