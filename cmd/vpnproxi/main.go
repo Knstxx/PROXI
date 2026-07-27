@@ -26,6 +26,7 @@ func main() {
 	createAdmin := flag.Bool("create-admin", false, "create or replace admin credentials and exit")
 	adminUsername := flag.String("admin-username", "", "admin username for --create-admin")
 	applyOnce := flag.Bool("apply-once", false, "apply current state to host and exit")
+	refreshCertificate := flag.Bool("refresh-certificate", false, "stage the current IPsec certificate and reload StrongSwan credentials")
 	flag.Parse()
 
 	if *createAdmin {
@@ -50,6 +51,19 @@ func main() {
 		for _, warning := range result.Warnings {
 			fmt.Printf("warning: %s\n", warning)
 		}
+		return
+	}
+
+	if *refreshCertificate {
+		state, err := app.NewStore(*statePath).Load()
+		if err != nil {
+			log.Fatal(err)
+		}
+		result, err := system.RefreshCertificate(state)
+		if err != nil {
+			log.Fatal(err)
+		}
+		fmt.Printf("changedFiles=%d commands=%d warnings=%d\n", len(result.ChangedFiles), len(result.Commands), len(result.Warnings))
 		return
 	}
 

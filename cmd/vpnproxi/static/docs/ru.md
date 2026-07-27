@@ -13,7 +13,7 @@
 
 1. Подготовь один gateway VPS с публичным IP.
 2. Направь DNS `A`-запись, например `vpn.example.com`, на этот gateway.
-3. Открой `500/udp` и `4500/udp` для IPsec.
+3. Открой `500/udp`, `4500/udp` и IP-протокол `50` (`ESP`) для IPsec.
 4. Открой `80/tcp` и `443/tcp`, если UI публикуется через `--domain`.
 5. Запусти installer на gateway:
 
@@ -56,7 +56,7 @@ VPNproxi управляет gateway, а не внешним exit-node.
 - DNS-запись: `vpn.example.com A <server-public-ip>`.
 - Значение `VPN domain`: `vpn.example.com`.
 - Installer запускается с `--domain vpn.example.com`, если для UI требуется HTTPS через Caddy.
-- UDP-порты `500` и `4500` должны быть доступны для IPsec.
+- UDP-порты `500`, `4500` и IP-протокол `50` (`ESP`) должны быть доступны для IPsec.
 - UI-порт по возможности оставляй доступным только из доверенной админской сети.
 
 ## Сертификаты

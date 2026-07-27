@@ -192,6 +192,7 @@ fi
 ufw allow OpenSSH
 ufw allow 500/udp
 ufw allow 4500/udp
+ufw allow proto esp
 if [[ -n "$DOMAIN" ]]; then
   ufw allow 80/tcp
   ufw allow 443/tcp
@@ -235,7 +236,7 @@ EOF
 
 systemctl daemon-reload
 systemctl enable vpnproxi-apply.service
-systemctl restart vpnproxi 2>/dev/null || systemctl enable --now vpnproxi
+systemctl enable --now vpnproxi
 systemctl start vpnproxi-apply.service
 
 echo "VPNproxi is running on $PUBLIC_URL"

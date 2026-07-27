@@ -46,9 +46,15 @@ func Apply(state core.State) (Result, error) {
 		{state.Server.UsersCSVPath, bundle.UsersCSV, 0o600},
 		{"/usr/local/bin/vpnproxi-geodata-update.sh", bundle.GeodataScript, 0o755},
 		{"/usr/local/bin/vpnproxi-firewall.sh", bundle.FirewallScript, 0o755},
+		{"/usr/local/bin/vpnproxi-routing.sh", bundle.RoutingScript, 0o755},
+		{"/etc/networkd-dispatcher/routable.d/50-vpnproxi-routing", bundle.RoutingScript, 0o755},
+		{"/etc/NetworkManager/dispatcher.d/50-vpnproxi-routing", bundle.RoutingScript, 0o755},
 		{"/etc/systemd/system/vpnproxi-apply.service", []byte(applyServiceUnit()), 0o644},
+		{"/etc/systemd/system/vpnproxi-routing.service", []byte(routingServiceUnit()), 0o644},
 		{"/etc/systemd/system/vpnproxi-geodata.service", []byte(geodataServiceUnit()), 0o644},
 		{"/etc/systemd/system/vpnproxi-geodata.timer", []byte(geodataTimerUnit()), 0o644},
+		{"/etc/systemd/system/vpnproxi-certificate-refresh.service", []byte(certificateRefreshServiceUnit()), 0o644},
+		{"/etc/systemd/system/vpnproxi-certificate-refresh.timer", []byte(certificateRefreshTimerUnit()), 0o644},
 	}
 	for _, w := range writes {
 		if err := atomicWrite(w.path, w.data, w.mode); err != nil {
@@ -62,7 +68,13 @@ func Apply(state core.State) (Result, error) {
 	if err := runRequired(&res, "systemctl", "enable", "vpnproxi-apply.service"); err != nil {
 		return res, err
 	}
+	if err := runRequired(&res, "systemctl", "enable", "--now", "vpnproxi-routing.service"); err != nil {
+		return res, err
+	}
 	if err := runRequired(&res, "systemctl", "enable", "--now", "vpnproxi-geodata.timer"); err != nil {
+		return res, err
+	}
+	if err := runRequired(&res, "systemctl", "enable", "--now", "vpnproxi-certificate-refresh.timer"); err != nil {
 		return res, err
 	}
 	if state.Routes.UseRunetGeodata {
@@ -85,6 +97,25 @@ func Apply(state core.State) (Result, error) {
 		return res, err
 	}
 	if err := runRequired(&res, "systemctl", "restart", "strongswan"); err != nil {
+		return res, err
+	}
+	return res, nil
+}
+
+func RefreshCertificate(state core.State) (Result, error) {
+	var res Result
+	_, changed, err := prepareSwanctlCertificate(state)
+	if err != nil {
+		return res, err
+	}
+	res.ChangedFiles = append(res.ChangedFiles, changed...)
+	if len(changed) == 0 {
+		return res, nil
+	}
+	if err := runRequired(&res, "swanctl", "--load-creds", "--clear"); err != nil {
+		return res, err
+	}
+	if err := runRequired(&res, "swanctl", "--load-conns"); err != nil {
 		return res, err
 	}
 	return res, nil
@@ -238,29 +269,52 @@ func prepareSwanctlCertificate(state core.State) (core.State, []string, error) {
 	if err != nil {
 		return state, nil, err
 	}
+	swanctlDir := filepath.Dir(state.Server.SwanctlPath)
+	if swanctlDir == "." || swanctlDir == string(filepath.Separator) || swanctlDir == "" {
+		swanctlDir = "/etc/swanctl"
+	}
+	certDir := filepath.Join(swanctlDir, "x509")
+	caDir := filepath.Join(swanctlDir, "x509ca")
+	privateDir := filepath.Join(swanctlDir, "private")
+	stem := certificateStem(state.Server.CertFile)
 	certs := splitPEMCertificates(data)
-	if len(certs) <= 1 {
-		return state, nil, nil
-	}
+	changed := []string{}
 
-	certDir := filepath.Dir(state.Server.CertFile)
-	caDir := filepath.Dir(state.Server.CAFile)
-	if caDir == "." || caDir == string(filepath.Separator) || caDir == "" {
-		caDir = "/etc/swanctl/x509ca"
-	}
-	leafPath := filepath.Join(certDir, certificateStem(state.Server.CertFile)+"-leaf.crt")
-	if err := atomicWrite(leafPath, certs[0], 0o644); err != nil {
-		return state, nil, err
-	}
-	changed := []string{leafPath}
-	for i, cert := range certs[1:] {
-		path := filepath.Join(caDir, fmt.Sprintf("%s-intermediate-%d.crt", certificateStem(state.Server.CertFile), i+1))
-		if err := atomicWrite(path, cert, 0o644); err != nil {
+	leafPath := state.Server.CertFile
+	if len(certs) > 1 || filepath.Clean(filepath.Dir(state.Server.CertFile)) != filepath.Clean(certDir) {
+		leafData := data
+		if len(certs) > 0 {
+			leafData = certs[0]
+		}
+		leafPath = filepath.Join(certDir, stem+"-leaf.crt")
+		if err := atomicWrite(leafPath, leafData, 0o644); err != nil {
 			return state, changed, err
 		}
-		changed = append(changed, path)
+		changed = append(changed, leafPath)
+	}
+	if len(certs) > 1 {
+		for i, cert := range certs[1:] {
+			path := filepath.Join(caDir, fmt.Sprintf("%s-intermediate-%d.crt", stem, i+1))
+			if err := atomicWrite(path, cert, 0o644); err != nil {
+				return state, changed, err
+			}
+			changed = append(changed, path)
+		}
 	}
 	state.Server.CertFile = leafPath
+
+	if state.Server.KeyFile != "" && filepath.Clean(filepath.Dir(state.Server.KeyFile)) != filepath.Clean(privateDir) {
+		keyData, err := os.ReadFile(state.Server.KeyFile)
+		if err != nil {
+			return state, changed, err
+		}
+		keyPath := filepath.Join(privateDir, stem+".key")
+		if err := atomicWrite(keyPath, keyData, 0o600); err != nil {
+			return state, changed, err
+		}
+		changed = append(changed, keyPath)
+		state.Server.KeyFile = keyPath
+	}
 	return state, changed, nil
 }
 
@@ -414,12 +468,57 @@ WantedBy=multi-user.target
 `
 }
 
+func routingServiceUnit() string {
+	return `[Unit]
+Description=Restore VPNproxi transparent-proxy policy route
+After=network-online.target systemd-networkd.service NetworkManager.service
+Wants=network-online.target
+PartOf=systemd-networkd.service NetworkManager.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/bin/vpnproxi-routing.sh
+ExecReload=/usr/local/bin/vpnproxi-routing.sh
+
+[Install]
+WantedBy=multi-user.target
+`
+}
+
 func geodataTimerUnit() string {
 	return `[Unit]
 Description=Run VPNproxi geodata update daily
 
 [Timer]
 OnCalendar=daily
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+`
+}
+
+func certificateRefreshServiceUnit() string {
+	return `[Unit]
+Description=Refresh VPNproxi IPsec certificate
+After=network-online.target strongswan.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+EnvironmentFile=/etc/vpnproxi/vpnproxi.env
+ExecStart=/usr/local/bin/vpnproxi --refresh-certificate
+`
+}
+
+func certificateRefreshTimerUnit() string {
+	return `[Unit]
+Description=Refresh VPNproxi IPsec certificate daily
+
+[Timer]
+OnCalendar=*-*-* 03:17:00
+RandomizedDelaySec=30m
 Persistent=true
 
 [Install]

@@ -7,7 +7,7 @@ Gateway host:
 - clean Debian or Ubuntu VPS;
 - public IP address;
 - DNS `A` record pointing the VPN domain to that host;
-- `500/udp` and `4500/udp` open for IPsec;
+- `500/udp`, `4500/udp`, and IP protocol `50` (`ESP`) open for IPsec;
 - `80/tcp` and `443/tcp` open when the UI is published through `--domain`.
 
 External exit host:

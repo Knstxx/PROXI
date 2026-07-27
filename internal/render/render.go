@@ -43,6 +43,7 @@ type Bundle struct {
 	UsersCSV       []byte
 	GeodataScript  []byte
 	FirewallScript []byte
+	RoutingScript  []byte
 }
 
 func Build(state core.State) (Bundle, error) {
@@ -57,6 +58,7 @@ func Build(state core.State) (Bundle, error) {
 		UsersCSV:       []byte(UsersCSV(state)),
 		GeodataScript:  []byte(GeodataScript(state)),
 		FirewallScript: []byte(FirewallScript(state)),
+		RoutingScript:  []byte(RoutingScript(state)),
 	}, nil
 }
 
@@ -287,6 +289,7 @@ case "$PLUTO_VERB" in
     else
       iptables -t mangle -I "$CHAIN" 1 -s "$PLUTO_PEER_SOURCEIP" -p tcp -m comment --comment "vpnproxi user=$VPN_USER xray-tcp" -j TPROXY --on-port "$TPROXY_PORT" --tproxy-mark %s/0xffffffff
       iptables -t mangle -I "$CHAIN" 1 -s "$PLUTO_PEER_SOURCEIP" -p udp -m comment --comment "vpnproxi user=$VPN_USER xray-udp" -j TPROXY --on-port "$TPROXY_PORT" --tproxy-mark %s/0xffffffff
+      iptables -t mangle -I "$CHAIN" 1 -s "$PLUTO_PEER_SOURCEIP" -m set --match-set "$DIRECT_SET" dst -m comment --comment "vpnproxi user=$VPN_USER direct-set" -j RETURN
       iptables -t mangle -I "$CHAIN" 1 -s "$PLUTO_PEER_SOURCEIP" -p tcp --dport 53 -m comment --comment "vpnproxi user=$VPN_USER direct-dns" -j RETURN
       iptables -t mangle -I "$CHAIN" 1 -s "$PLUTO_PEER_SOURCEIP" -p udp --dport 53 -m comment --comment "vpnproxi user=$VPN_USER direct-dns" -j RETURN
     fi
@@ -348,7 +351,8 @@ func FirewallScript(state core.State) string {
 	}
 	proxyCIDRs := staticCIDRRules(state.Routes.ProxyIPs)
 	directCIDRs := staticCIDRRules(state.Routes.DirectIPs)
-	dnsmasqDomains := dnsmasqDomainRules(state.Routes.ProxyDomains)
+	dnsmasqProxyDomains := dnsmasqDomainRules(state.Routes.ProxyDomains)
+	dnsmasqDirectDomains := dnsmasqDomainRules(state.Routes.DirectDomains)
 	dnsmasqServers := upstreamDNSServers(state)
 	proxyGeoIPFiles := selectiveGeoIPListFiles(state)
 	loadRunetDomains := selectiveRunetDomainListEnabled(state)
@@ -514,23 +518,49 @@ bind-interfaces
 no-hosts
 no-resolv
 cache-size=10000
+dns-forward-max=1000
 conf-file=/usr/local/etc/vpnproxi/dnsmasq-routes.conf
 %s
 DNSMASQ
+  cat >/usr/local/etc/vpnproxi/dnsmasq-direct-domains.txt <<'VPNPROXI_DIRECT_DOMAINS'
+%s
+VPNPROXI_DIRECT_DOMAINS
   cat >/usr/local/etc/vpnproxi/dnsmasq-routes.conf <<DNSROUTES
+%s
 %s
 DNSROUTES
   if [[ "$LOAD_RUNET_DOMAIN_LIST" == "1" && -r "$GEODATA_DIR/ru-blocked-all.txt" ]]; then
     awk -v set="$PROXY_SET" '
+      FILENAME == ARGV[1] {
+        domain = tolower($0)
+        if (domain != "") {
+          direct_domains[domain] = 1
+        }
+        next
+      }
+      function is_direct_or_subdomain(domain, candidate, separator) {
+        candidate = tolower(domain)
+        while (candidate != "") {
+          if (candidate in direct_domains) {
+            return 1
+          }
+          separator = index(candidate, ".")
+          if (separator == 0) {
+            break
+          }
+          candidate = substr(candidate, separator + 1)
+        }
+        return 0
+      }
       /^domain:/ || /^full:/ {
         domain = $0
         sub(/^domain:/, "", domain)
         sub(/^full:/, "", domain)
-        if (domain != "" && domain !~ /^regexp:/ && domain !~ /^geosite:/ && domain ~ /^[A-Za-z0-9._*-]+$/) {
+        if (domain != "" && domain !~ /^regexp:/ && domain !~ /^geosite:/ && domain ~ /^[A-Za-z0-9._*-]+$/ && !is_direct_or_subdomain(domain)) {
           printf "ipset=/%%s/%%s\n", domain, set
         }
       }
-    ' "$GEODATA_DIR/ru-blocked-all.txt" >>/usr/local/etc/vpnproxi/dnsmasq-routes.conf
+    ' /usr/local/etc/vpnproxi/dnsmasq-direct-domains.txt "$GEODATA_DIR/ru-blocked-all.txt" >>/usr/local/etc/vpnproxi/dnsmasq-routes.conf
   fi
   cat >/etc/systemd/system/vpnproxi-dnsmasq.service <<'DNSMASQ_SERVICE'
 [Unit]
@@ -641,7 +671,23 @@ iptables -I FORWARD 1 -s "$VPN_SUBNET" -o "$WAN_IFACE" -j ACCEPT
 iptables -I FORWARD 2 -d "$VPN_SUBNET" -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
 iptables -t mangle -I FORWARD 1 -s "$VPN_SUBNET" -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
 iptables -t mangle -I FORWARD 2 -d "$VPN_SUBNET" -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
-`, routeMode(state), state.Server.VPNSubnet, gatewayIP, state.Server.GeodataDir, loadRunetDomainList, fmt.Sprintf("%d", state.Server.TProxyPort), state.Server.TProxyMark, state.Server.TProxyTable, proxySetName, directSetName, shellHereDocLines(proxyCIDRs), shellHereDocLines(directCIDRs), shellHereDocLines(proxyGeoIPFiles), dnsmasqServerLines(dnsmasqServers), dnsmasqIPSetLines(dnsmasqDomains), proxyPortRules)
+`, routeMode(state), state.Server.VPNSubnet, gatewayIP, state.Server.GeodataDir, loadRunetDomainList, fmt.Sprintf("%d", state.Server.TProxyPort), state.Server.TProxyMark, state.Server.TProxyTable, proxySetName, directSetName, shellHereDocLines(proxyCIDRs), shellHereDocLines(directCIDRs), shellHereDocLines(proxyGeoIPFiles), dnsmasqServerLines(dnsmasqServers), shellHereDocLines(dnsmasqDirectDomains), dnsmasqIPSetLines(dnsmasqProxyDomains, proxySetName), dnsmasqIPSetLines(dnsmasqDirectDomains, directSetName), proxyPortRules)
+}
+
+func RoutingScript(state core.State) string {
+	return fmt.Sprintf(`#!/bin/bash
+set -euo pipefail
+TPROXY_MARK=%q
+TPROXY_TABLE=%d
+TPROXY_PRIORITY=219
+LOCK_FILE=/run/vpnproxi-routing.lock
+
+exec 9>"$LOCK_FILE"
+flock -x 9
+while ip rule delete fwmark "$TPROXY_MARK" table "$TPROXY_TABLE" 2>/dev/null; do :; done
+ip rule add priority "$TPROXY_PRIORITY" fwmark "$TPROXY_MARK" table "$TPROXY_TABLE"
+ip route replace local 0.0.0.0/0 dev lo table "$TPROXY_TABLE"
+`, state.Server.TProxyMark, state.Server.TProxyTable)
 }
 
 func GeodataScript(state core.State) string {
@@ -914,10 +960,10 @@ func dnsmasqServerLines(values []string) string {
 	return strings.TrimRight(b.String(), "\n")
 }
 
-func dnsmasqIPSetLines(domains []string) string {
+func dnsmasqIPSetLines(domains []string, setName string) string {
 	var b strings.Builder
 	for _, domain := range domains {
-		fmt.Fprintf(&b, "ipset=/%s/%s\n", domain, proxySetName)
+		fmt.Fprintf(&b, "ipset=/%s/%s\n", domain, setName)
 	}
 	return strings.TrimRight(b.String(), "\n")
 }

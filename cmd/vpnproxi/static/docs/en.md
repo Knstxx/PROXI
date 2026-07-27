@@ -13,7 +13,7 @@
 
 1. Prepare one gateway VPS with a public IP.
 2. Point a DNS `A` record such as `vpn.example.com` to that gateway.
-3. Open `500/udp` and `4500/udp` for IPsec.
+3. Open `500/udp`, `4500/udp`, and IP protocol `50` (`ESP`) for IPsec.
 4. Open `80/tcp` and `443/tcp` when the UI is exposed through `--domain`.
 5. Run the installer on the gateway:
 
@@ -56,7 +56,7 @@ Recommended production setup:
 - DNS record: `vpn.example.com A <server-public-ip>`.
 - `VPN domain` value: `vpn.example.com`.
 - The installer is run with `--domain vpn.example.com` when UI HTTPS through Caddy is required.
-- Keep UDP `500` and `4500` open for IPsec.
+- Keep UDP `500`, `4500`, and IP protocol `50` (`ESP`) open for IPsec.
 - Keep the UI port open only to trusted admin networks when possible.
 
 ## Certificates

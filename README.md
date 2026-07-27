@@ -88,7 +88,7 @@ Prepare one gateway host with:
 - clean Debian or Ubuntu;
 - public IP address;
 - DNS `A` record such as `vpn.example.com` pointing to that host;
-- `500/udp` and `4500/udp` open for IPsec;
+- `500/udp`, `4500/udp`, and IP protocol `50` (`ESP`) open for IPsec;
 - `80/tcp` and `443/tcp` open when the UI is published with `--domain`.
 
 ## External Server Requirements

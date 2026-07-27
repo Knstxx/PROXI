@@ -16,6 +16,7 @@ func TestXrayConfigContainsTransparentInboundAndOutboundMark(t *testing.T) {
 	state := core.DefaultState()
 	state.Server.Users = []core.VPNUser{{Login: "vpn_admin", Password: "change-me-now"}}
 	state.Routes.Mode = "selective"
+	state.Routes.DirectDomains = []string{"domain:youtube.com"}
 	out, err := link.Parse("vless://11111111-2222-4333-8444-555555555555@example.com:443?type=tcp&security=none#node")
 	if err != nil {
 		t.Fatal(err)
@@ -98,6 +99,15 @@ func TestXrayConfigContainsTransparentInboundAndOutboundMark(t *testing.T) {
 	}
 	if !strings.Contains(firewall, `listen-address=$VPN_GATEWAY`) || !strings.Contains(firewall, `ipset=/whatismyipaddress.com/VPNPROXI_PROXY4`) {
 		t.Fatalf("selective firewall must configure dnsmasq/ipset domain routing: %s", firewall)
+	}
+	if !strings.Contains(firewall, `dns-forward-max=1000`) {
+		t.Fatalf("dnsmasq must tolerate whole-network DNS bursts: %s", firewall)
+	}
+	if !strings.Contains(firewall, `ipset=/youtube.com/VPNPROXI_DIRECT4`) {
+		t.Fatalf("direct domains must populate the direct kernel set: %s", firewall)
+	}
+	if !strings.Contains(firewall, `function is_direct_or_subdomain`) || strings.Contains(firewall, `for (direct_domain in direct_domains)`) {
+		t.Fatalf("runet domain filtering must use bounded suffix lookups instead of scanning every direct domain: %s", firewall)
 	}
 	if !strings.Contains(firewall, `awk -v set="$PROXY_SET"`) || strings.Contains(firewall, `done <"$GEODATA_DIR/ru-blocked-all.txt"`) {
 		t.Fatalf("runet domain routing must be generated without a million-line bash loop: %s", firewall)
@@ -204,6 +214,12 @@ func TestForceModeKeepsXrayDatForRunetRules(t *testing.T) {
 	if !strings.Contains(string(xray), `geoip:ru-blocked-community`) || !strings.Contains(string(xray), `geosite:ru-blocked-all`) {
 		t.Fatalf("force mode must render Xray runet categories: %s", xray)
 	}
+	updown := Updown(state)
+	forceProxyAt := strings.LastIndex(updown, `--comment "vpnproxi user=$VPN_USER xray-udp"`)
+	directSetAt := strings.LastIndex(updown, `--comment "vpnproxi user=$VPN_USER direct-set" -j RETURN`)
+	if forceProxyAt < 0 || directSetAt < 0 || directSetAt < forceProxyAt {
+		t.Fatalf("force mode direct-set RETURN must be inserted after catch-all proxy rules in script so iptables -I gives it higher priority: %s", updown)
+	}
 }
 
 func TestGeneratedShellScriptsHaveValidSyntax(t *testing.T) {
@@ -220,6 +236,7 @@ func TestGeneratedShellScriptsHaveValidSyntax(t *testing.T) {
 		"updown.sh":   Updown(state),
 		"firewall.sh": FirewallScript(state),
 		"geodata.sh":  GeodataScript(state),
+		"routing.sh":  RoutingScript(state),
 	} {
 		path := filepath.Join(t.TempDir(), name)
 		if err := os.WriteFile(path, []byte(script), 0o700); err != nil {
@@ -227,6 +244,20 @@ func TestGeneratedShellScriptsHaveValidSyntax(t *testing.T) {
 		}
 		if out, err := exec.Command("bash", "-n", path).CombinedOutput(); err != nil {
 			t.Fatalf("%s has invalid bash syntax: %v\n%s", name, err, out)
+		}
+	}
+}
+
+func TestRoutingScriptRestoresPolicyRouteAfterNetworkRestart(t *testing.T) {
+	state := core.DefaultState()
+	script := RoutingScript(state)
+	for _, want := range []string{
+		`flock -x 9`,
+		`ip rule add priority "$TPROXY_PRIORITY" fwmark "$TPROXY_MARK" table "$TPROXY_TABLE"`,
+		`ip route replace local 0.0.0.0/0 dev lo table "$TPROXY_TABLE"`,
+	} {
+		if !strings.Contains(script, want) {
+			t.Fatalf("routing script is missing %q: %s", want, script)
 		}
 	}
 }

@@ -29,7 +29,7 @@ go build -o /tmp/vpnproxi ./cmd/vpnproxi
   - prompts for admin credentials;
   - writes `/etc/vpnproxi/admin.json` with `0600`;
   - exposes only `80/443` when a domain is used, or only the selected UI port otherwise;
-  - leaves IPsec on `500/udp` and `4500/udp`.
+  - leaves IPsec on `500/udp`, `4500/udp`, and IP protocol `50` (`ESP`).
 - Verify the service starts with:
 
 ```bash
