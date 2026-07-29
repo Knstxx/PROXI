@@ -63,69 +63,50 @@ func TestXrayConfigContainsTransparentInboundAndOutboundMark(t *testing.T) {
 	if firstRule["outboundTag"] != "api" {
 		t.Fatalf("first routing rule must expose xray API, got %#v", firstRule)
 	}
+	lastRule := rules[len(rules)-1].(map[string]any)
+	if lastRule["ruleTag"] != "selective-direct-default-vpn_admin" || lastRule["outboundTag"] != "direct-vpn_admin" {
+		t.Fatalf("selective mode must default each client to direct after proxy matches, got %#v", lastRule)
+	}
+	if !strings.Contains(string(raw), `"geosite:ru-blocked-all"`) || !strings.Contains(string(raw), `"geoip:ru-blocked-community"`) {
+		t.Fatalf("selective mode must evaluate the maintained blocked categories inside Xray: %s", raw)
+	}
 	usersCSV := UsersCSV(state)
 	if !strings.Contains(usersCSV, "vpn_admin,10001,ipsec-tproxy-vpn_admin") {
 		t.Fatalf("users CSV must allocate per-user tproxy ports: %s", usersCSV)
 	}
 	firewall := FirewallScript(state)
-	if !strings.Contains(firewall, `-j TPROXY --on-port "$TPROXY_PORT"`) {
-		t.Fatalf("firewall TPROXY rule is missing: %s", firewall)
+	for _, want := range []string{
+		`-p udp -j TPROXY --on-port "$TPROXY_PORT"`,
+		`-p tcp -j TPROXY --on-port "$TPROXY_PORT"`,
+		`-m addrtype --dst-type LOCAL -j RETURN`,
+		`-d 10.0.0.0/8 -j RETURN`,
+		`-d 192.168.0.0/16 -j RETURN`,
+		`listen-address=$VPN_GATEWAY`,
+	} {
+		if !strings.Contains(firewall, want) {
+			t.Fatalf("selective firewall is missing %q: %s", want, firewall)
+		}
 	}
-	if !strings.Contains(firewall, `-m set --match-set "$PROXY_SET" dst -j TPROXY`) {
-		t.Fatalf("selective firewall must proxy only kernel-set matches: %s", firewall)
-	}
-	if !strings.Contains(firewall, `ipset swap "$PROXY_SET_NEXT" "$PROXY_SET"`) || !strings.Contains(firewall, `ipset swap "$DIRECT_SET_NEXT" "$DIRECT_SET"`) {
-		t.Fatalf("firewall must atomically swap prepared ipsets into live names: %s", firewall)
-	}
-	preSwap := firewall[:strings.Index(firewall, `ipset swap "$PROXY_SET_NEXT" "$PROXY_SET"`)]
-	if strings.Contains(preSwap, `ipset flush "$PROXY_SET"`) || strings.Contains(preSwap, `ipset flush "$DIRECT_SET"`) {
-		t.Fatalf("firewall must not flush active ipsets referenced by live rules before atomic swap: %s", firewall)
-	}
-	if !strings.Contains(firewall, `ipset restore -exist <"$proxy_restore"`) || !strings.Contains(firewall, `ipset restore -exist <"$direct_restore"`) {
-		t.Fatalf("firewall must batch-load ipsets with ipset restore: %s", firewall)
-	}
-	if strings.Contains(firewall, `ipset add "$PROXY_SET_NEXT"`) || strings.Contains(firewall, `ipset add "$DIRECT_SET_NEXT"`) {
-		t.Fatalf("firewall must not load large ipsets with one ipset add process per entry: %s", firewall)
-	}
-	if !strings.Contains(firewall, `valid_ipv4_cidr "$cidr"`) || !strings.Contains(firewall, `10#$octet <= 255`) || !strings.Contains(firewall, `10#$mask <= 32`) {
-		t.Fatalf("firewall must strictly validate CIDRs before ipset restore: %s", firewall)
-	}
-	if strings.Contains(firewall, `elif [[ "$MODE" == "selective" ]]; then
-  iptables -t mangle -A "$CHAIN" -s "$VPN_SUBNET" -p udp --dport 53 -j RETURN
-  iptables -t mangle -A "$CHAIN" -s "$VPN_SUBNET" -p tcp --dport 53 -j RETURN
-  iptables -t mangle -A "$CHAIN" -s "$VPN_SUBNET" -m set --match-set "$DIRECT_SET" dst -j RETURN
-  iptables -t mangle -A "$CHAIN" -s "$VPN_SUBNET" -p udp -j TPROXY`) {
-		t.Fatalf("selective firewall must not proxy all UDP traffic: %s", firewall)
-	}
-	if !strings.Contains(firewall, `listen-address=$VPN_GATEWAY`) || !strings.Contains(firewall, `ipset=/whatismyipaddress.com/VPNPROXI_PROXY4`) {
-		t.Fatalf("selective firewall must configure dnsmasq/ipset domain routing: %s", firewall)
+	if strings.Contains(firewall, `--match-set "$PROXY_SET" dst -j TPROXY`) || strings.Contains(firewall, `conf-file=/usr/local/etc/vpnproxi/dnsmasq-routes.conf`) {
+		t.Fatalf("selective routing must no longer depend on dnsmasq/ipset classification: %s", firewall)
 	}
 	if !strings.Contains(firewall, `dns-forward-max=1000`) {
 		t.Fatalf("dnsmasq must tolerate whole-network DNS bursts: %s", firewall)
 	}
-	if !strings.Contains(firewall, `ipset=/youtube.com/VPNPROXI_DIRECT4`) {
-		t.Fatalf("direct domains must populate the direct kernel set: %s", firewall)
-	}
-	if !strings.Contains(firewall, `function is_direct_or_subdomain`) || strings.Contains(firewall, `for (direct_domain in direct_domains)`) {
-		t.Fatalf("runet domain filtering must use bounded suffix lookups instead of scanning every direct domain: %s", firewall)
-	}
-	if !strings.Contains(firewall, `awk -v set="$PROXY_SET"`) || strings.Contains(firewall, `done <"$GEODATA_DIR/ru-blocked-all.txt"`) {
-		t.Fatalf("runet domain routing must be generated without a million-line bash loop: %s", firewall)
+	if !strings.Contains(firewall, `rm -f /usr/local/etc/vpnproxi/dnsmasq-routes.conf`) {
+		t.Fatalf("firewall must remove obsolete large DNS routing artifacts: %s", firewall)
 	}
 	geodata := GeodataScript(state)
-	if !strings.Contains(firewall, `ru-blocked-all.txt`) || !strings.Contains(geodata, `russia-blocked-geosite/release/ru-blocked-all.txt`) {
-		t.Fatalf("runet blocked domains must feed dnsmasq/ipset routing")
+	if !strings.Contains(geodata, `DOWNLOAD_XRAY_DAT="1"`) || !strings.Contains(geodata, `russia-v2ray-rules-dat/release/geoip.dat`) || !strings.Contains(geodata, `russia-v2ray-rules-dat/release/geosite.dat`) {
+		t.Fatalf("selective mode must refresh Xray geodata files: %s", geodata)
 	}
-	if !strings.Contains(firewall, `ru-blocked-community.txt`) || !strings.Contains(geodata, `russia-blocked-geoip/release/text/ru-blocked-community.txt`) {
-		t.Fatalf("runet community IP list must feed ipset routing")
-	}
-	if strings.Contains(geodata, `DOWNLOAD_XRAY_DAT="1"`) {
-		t.Fatalf("selective mode must not require Xray .dat files for blocked-list routing: %s", geodata)
+	if strings.Contains(geodata, `fetch_text_list`) || strings.Contains(geodata, `russia-blocked-geosite/release/ru-blocked-all.txt`) {
+		t.Fatalf("geodata refresh must not retain obsolete text-list routing: %s", geodata)
 	}
 	if !strings.Contains(geodata, `--connect-timeout 30`) || !strings.Contains(geodata, `--max-time 300`) || !strings.Contains(geodata, `--retry 3`) {
-		t.Fatalf("geodata downloads must tolerate first-time large list refreshes: %s", geodata)
+		t.Fatalf("geodata downloads must tolerate transient network failures: %s", geodata)
 	}
-	if !strings.Contains(geodata, `LIST_MAX_AGE_SECONDS=$((20 * 60 * 60))`) || !strings.Contains(geodata, `is_fresh "$SHARE_DIR/$name"`) {
+	if !strings.Contains(geodata, `LIST_MAX_AGE_SECONDS=$((20 * 60 * 60))`) || !strings.Contains(geodata, `is_fresh "$SHARE_DIR/geoip.dat"`) {
 		t.Fatalf("geodata downloads must skip fresh files during repeated apply: %s", geodata)
 	}
 	if !strings.Contains(firewall, `-d "$VPN_GATEWAY" -p udp --dport 53 -j ACCEPT`) {
@@ -153,10 +134,11 @@ func TestXrayConfigContainsTransparentInboundAndOutboundMark(t *testing.T) {
 	if !strings.Contains(firewall, `FWD_CHAIN="VPNPROXI_FORWARD"`) || !strings.Contains(updown, `FWD_CHAIN="VPNPROXI_FORWARD"`) {
 		t.Fatalf("client traffic accounting must use a project-owned forward chain")
 	}
-	directSetAt := strings.LastIndex(updown, `--comment "vpnproxi user=$VPN_USER direct-set" -j RETURN`)
-	proxySetAt := strings.Index(updown, `--comment "vpnproxi user=$VPN_USER xray-set-udp"`)
-	if directSetAt < 0 || proxySetAt < 0 || directSetAt < proxySetAt {
-		t.Fatalf("per-user direct-set RETURN must be inserted after proxy rules in script so iptables -I gives it higher priority: %s", updown)
+	catchAllAt := strings.LastIndex(updown, `--comment "vpnproxi user=$VPN_USER xray-udp"`)
+	localAt := strings.LastIndex(updown, `--comment "vpnproxi user=$VPN_USER direct-local"`)
+	dnsAt := strings.LastIndex(updown, `--comment "vpnproxi user=$VPN_USER direct-dns"`)
+	if catchAllAt < 0 || localAt < catchAllAt || dnsAt < localAt {
+		t.Fatalf("per-user local and DNS bypasses must be inserted after catch-all rules so -I gives them priority: %s", updown)
 	}
 	if strings.Contains(updown, `| grep -- "-s ${PLUTO_PEER_SOURCEIP}/32"`) {
 		t.Fatalf("updown cleanup must remove per-user rules explicitly instead of parsing iptables output: %s", updown)
@@ -214,11 +196,29 @@ func TestForceModeKeepsXrayDatForRunetRules(t *testing.T) {
 	if !strings.Contains(string(xray), `geoip:ru-blocked-community`) || !strings.Contains(string(xray), `geosite:ru-blocked-all`) {
 		t.Fatalf("force mode must render Xray runet categories: %s", xray)
 	}
+	if !strings.Contains(string(xray), `"ruleTag": "force-proxy-default"`) {
+		t.Fatalf("force mode must keep its final external-outbound rule: %s", xray)
+	}
 	updown := Updown(state)
-	forceProxyAt := strings.LastIndex(updown, `--comment "vpnproxi user=$VPN_USER xray-udp"`)
-	directSetAt := strings.LastIndex(updown, `--comment "vpnproxi user=$VPN_USER direct-set" -j RETURN`)
-	if forceProxyAt < 0 || directSetAt < 0 || directSetAt < forceProxyAt {
-		t.Fatalf("force mode direct-set RETURN must be inserted after catch-all proxy rules in script so iptables -I gives it higher priority: %s", updown)
+	if !strings.Contains(updown, `--comment "vpnproxi user=$VPN_USER xray-udp"`) || !strings.Contains(updown, `--comment "vpnproxi user=$VPN_USER direct-local"`) {
+		t.Fatalf("force mode must use the common Xray datapath with local-network bypasses: %s", updown)
+	}
+}
+
+func TestSelectiveCustomGeodataRulesDownloadDatFiles(t *testing.T) {
+	state := core.DefaultState()
+	state.Routes.Mode = "selective"
+	state.Routes.UseRunetGeodata = false
+	state.Routes.ProxyDomains = []string{"geosite:youtube"}
+	state.Routes.ProxyIPs = []string{"geoip:google"}
+
+	if got := GeodataScript(state); !strings.Contains(got, `DOWNLOAD_XRAY_DAT="1"`) {
+		t.Fatalf("custom Xray categories must enable .dat downloads: %s", got)
+	}
+
+	state.Routes.Mode = "direct"
+	if got := GeodataScript(state); !strings.Contains(got, `DOWNLOAD_XRAY_DAT="0"`) {
+		t.Fatalf("direct mode must not download unused Xray geodata: %s", got)
 	}
 }
 

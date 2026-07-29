@@ -18,23 +18,7 @@ const (
 	blockOutboundTag  = "block"
 	proxySetName      = "VPNPROXI_PROXY4"
 	directSetName     = "VPNPROXI_DIRECT4"
-	textRuBlocked     = "ru-blocked.txt"
-	textRuCommunity   = "ru-blocked-community.txt"
-	textTelegram      = "telegram.txt"
-	textRuDomains     = "ru-blocked-all.txt"
 )
-
-type textListSource struct {
-	Name string
-	URL  string
-}
-
-var runetTextListSources = []textListSource{
-	{Name: textRuBlocked, URL: "https://raw.githubusercontent.com/runetfreedom/russia-blocked-geoip/release/text/ru-blocked.txt"},
-	{Name: textRuCommunity, URL: "https://raw.githubusercontent.com/runetfreedom/russia-blocked-geoip/release/text/ru-blocked-community.txt"},
-	{Name: textTelegram, URL: "https://raw.githubusercontent.com/runetfreedom/russia-blocked-geoip/release/text/telegram.txt"},
-	{Name: textRuDomains, URL: "https://raw.githubusercontent.com/runetfreedom/russia-blocked-geosite/release/ru-blocked-all.txt"},
-}
 
 type Bundle struct {
 	XrayConfig     []byte
@@ -93,7 +77,7 @@ func XrayConfig(state core.State) ([]byte, error) {
 	if state.Routes.Mode != "direct" && len(state.Routes.ProxyPorts) > 0 {
 		rules = appendProxyRules(rules, state, "force-proxy-ports", "port", joinPorts(state.Routes.ProxyPorts))
 	}
-	if state.Routes.Mode == "force_proxy" && state.Routes.UseRunetGeodata {
+	if state.Routes.Mode != "direct" && state.Routes.UseRunetGeodata {
 		rules = appendProxyRules(rules, state, "runetfreedom-geosite", "domain", []string{"geosite:ru-blocked-all"})
 		rules = appendProxyRules(rules, state, "runetfreedom-geoip", "ip", []string{"geoip:ru-blocked", "geoip:ru-blocked-community", "geoip:telegram"})
 	}
@@ -101,7 +85,7 @@ func XrayConfig(state core.State) ([]byte, error) {
 		rules = appendProxyRules(rules, state, "force-proxy-default", "", nil)
 	}
 	if state.Routes.Mode == "selective" {
-		rules = appendProxyRules(rules, state, "selective-proxy-default", "", nil)
+		rules = appendDirectRules(rules, state, "selective-direct-default", "", nil)
 	}
 	outbounds := []any{
 		directOutbound(directOutboundTag),
@@ -239,7 +223,6 @@ func writeSwanctlConnection(b *strings.Builder, name, localID, certFile, updownP
 }
 
 func Updown(state core.State) string {
-	proxyPortRules := tproxyPortRules(state.Routes.ProxyPorts, "$TPROXY_PORT", state.Server.TProxyMark)
 	return fmt.Sprintf(`#!/bin/bash
 set -euo pipefail
 MODE=%q
@@ -248,6 +231,7 @@ CHAIN="VPNPROXI_TPROXY"
 FWD_CHAIN="VPNPROXI_FORWARD"
 PROXY_SET=%q
 DIRECT_SET=%q
+TPROXY_MARK=%q
 VPN_USER="${PLUTO_XAUTH_ID:-$PLUTO_PEER_ID}"
 logger -t vpnproxi-updown "$PLUTO_VERB user=$VPN_USER ip=$PLUTO_PEER_SOURCEIP"
 TPROXY_PORT=$(grep -v '^#' "$USERS_CSV" | awk -F',' -v user="$VPN_USER" '$1 == user { print $2; exit }')
@@ -264,12 +248,15 @@ iptables -t mangle -C FORWARD -j "$FWD_CHAIN" 2>/dev/null || iptables -t mangle 
 flush_rules() {
   while iptables -t mangle -D "$CHAIN" -s "$PLUTO_PEER_SOURCEIP" -p udp --dport 53 -m comment --comment "vpnproxi user=$VPN_USER direct-dns" -j RETURN 2>/dev/null; do :; done
   while iptables -t mangle -D "$CHAIN" -s "$PLUTO_PEER_SOURCEIP" -p tcp --dport 53 -m comment --comment "vpnproxi user=$VPN_USER direct-dns" -j RETURN 2>/dev/null; do :; done
+  while iptables -t mangle -D "$CHAIN" -s "$PLUTO_PEER_SOURCEIP" -m addrtype --dst-type LOCAL -m comment --comment "vpnproxi user=$VPN_USER direct-local" -j RETURN 2>/dev/null; do :; done
+  for subnet in 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 169.254.0.0/16; do
+    while iptables -t mangle -D "$CHAIN" -s "$PLUTO_PEER_SOURCEIP" -d "$subnet" -m comment --comment "vpnproxi user=$VPN_USER direct-private" -j RETURN 2>/dev/null; do :; done
+  done
   while iptables -t mangle -D "$CHAIN" -s "$PLUTO_PEER_SOURCEIP" -m set --match-set "$DIRECT_SET" dst -m comment --comment "vpnproxi user=$VPN_USER direct-set" -j RETURN 2>/dev/null; do :; done
-  while iptables -t mangle -D "$CHAIN" -s "$PLUTO_PEER_SOURCEIP" -p udp -m set --match-set "$PROXY_SET" dst -m comment --comment "vpnproxi user=$VPN_USER xray-set-udp" -j TPROXY --on-port "$TPROXY_PORT" --tproxy-mark %s/0xffffffff 2>/dev/null; do :; done
-  while iptables -t mangle -D "$CHAIN" -s "$PLUTO_PEER_SOURCEIP" -p tcp -m set --match-set "$PROXY_SET" dst -m comment --comment "vpnproxi user=$VPN_USER xray-set-tcp" -j TPROXY --on-port "$TPROXY_PORT" --tproxy-mark %s/0xffffffff 2>/dev/null; do :; done
-  while iptables -t mangle -D "$CHAIN" -s "$PLUTO_PEER_SOURCEIP" -p udp -m comment --comment "vpnproxi user=$VPN_USER xray-udp" -j TPROXY --on-port "$TPROXY_PORT" --tproxy-mark %s/0xffffffff 2>/dev/null; do :; done
-  while iptables -t mangle -D "$CHAIN" -s "$PLUTO_PEER_SOURCEIP" -p tcp -m comment --comment "vpnproxi user=$VPN_USER xray-tcp" -j TPROXY --on-port "$TPROXY_PORT" --tproxy-mark %s/0xffffffff 2>/dev/null; do :; done
-%s
+  while iptables -t mangle -D "$CHAIN" -s "$PLUTO_PEER_SOURCEIP" -p udp -m set --match-set "$PROXY_SET" dst -m comment --comment "vpnproxi user=$VPN_USER xray-set-udp" -j TPROXY --on-port "$TPROXY_PORT" --tproxy-mark ${TPROXY_MARK}/0xffffffff 2>/dev/null; do :; done
+  while iptables -t mangle -D "$CHAIN" -s "$PLUTO_PEER_SOURCEIP" -p tcp -m set --match-set "$PROXY_SET" dst -m comment --comment "vpnproxi user=$VPN_USER xray-set-tcp" -j TPROXY --on-port "$TPROXY_PORT" --tproxy-mark ${TPROXY_MARK}/0xffffffff 2>/dev/null; do :; done
+  while iptables -t mangle -D "$CHAIN" -s "$PLUTO_PEER_SOURCEIP" -p udp -m comment --comment "vpnproxi user=$VPN_USER xray-udp" -j TPROXY --on-port "$TPROXY_PORT" --tproxy-mark ${TPROXY_MARK}/0xffffffff 2>/dev/null; do :; done
+  while iptables -t mangle -D "$CHAIN" -s "$PLUTO_PEER_SOURCEIP" -p tcp -m comment --comment "vpnproxi user=$VPN_USER xray-tcp" -j TPROXY --on-port "$TPROXY_PORT" --tproxy-mark ${TPROXY_MARK}/0xffffffff 2>/dev/null; do :; done
   while iptables -t mangle -D "$FWD_CHAIN" -s "$PLUTO_PEER_SOURCEIP" -m comment --comment "vpnproxi user=$VPN_USER direct-upload" -j RETURN 2>/dev/null; do :; done
   while iptables -t mangle -D "$FWD_CHAIN" -d "$PLUTO_PEER_SOURCEIP" -m comment --comment "vpnproxi user=$VPN_USER direct-download" -j RETURN 2>/dev/null; do :; done
   while iptables -t mangle -D "$CHAIN" -s "$PLUTO_PEER_SOURCEIP" -m comment --comment "vpnproxi user=$VPN_USER direct-all" -j RETURN 2>/dev/null; do :; done
@@ -279,17 +266,13 @@ case "$PLUTO_VERB" in
     flush_rules
     if [[ "$MODE" == "direct" ]]; then
       iptables -t mangle -I "$CHAIN" 1 -s "$PLUTO_PEER_SOURCEIP" -m comment --comment "vpnproxi user=$VPN_USER direct-all" -j RETURN
-    elif [[ "$MODE" == "selective" ]]; then
-      iptables -t mangle -I "$CHAIN" 1 -s "$PLUTO_PEER_SOURCEIP" -p tcp -m set --match-set "$PROXY_SET" dst -m comment --comment "vpnproxi user=$VPN_USER xray-set-tcp" -j TPROXY --on-port "$TPROXY_PORT" --tproxy-mark %s/0xffffffff
-      iptables -t mangle -I "$CHAIN" 1 -s "$PLUTO_PEER_SOURCEIP" -p udp -m set --match-set "$PROXY_SET" dst -m comment --comment "vpnproxi user=$VPN_USER xray-set-udp" -j TPROXY --on-port "$TPROXY_PORT" --tproxy-mark %s/0xffffffff
-%s
-      iptables -t mangle -I "$CHAIN" 1 -s "$PLUTO_PEER_SOURCEIP" -m set --match-set "$DIRECT_SET" dst -m comment --comment "vpnproxi user=$VPN_USER direct-set" -j RETURN
-      iptables -t mangle -I "$CHAIN" 1 -s "$PLUTO_PEER_SOURCEIP" -p tcp --dport 53 -m comment --comment "vpnproxi user=$VPN_USER direct-dns" -j RETURN
-      iptables -t mangle -I "$CHAIN" 1 -s "$PLUTO_PEER_SOURCEIP" -p udp --dport 53 -m comment --comment "vpnproxi user=$VPN_USER direct-dns" -j RETURN
     else
-      iptables -t mangle -I "$CHAIN" 1 -s "$PLUTO_PEER_SOURCEIP" -p tcp -m comment --comment "vpnproxi user=$VPN_USER xray-tcp" -j TPROXY --on-port "$TPROXY_PORT" --tproxy-mark %s/0xffffffff
-      iptables -t mangle -I "$CHAIN" 1 -s "$PLUTO_PEER_SOURCEIP" -p udp -m comment --comment "vpnproxi user=$VPN_USER xray-udp" -j TPROXY --on-port "$TPROXY_PORT" --tproxy-mark %s/0xffffffff
-      iptables -t mangle -I "$CHAIN" 1 -s "$PLUTO_PEER_SOURCEIP" -m set --match-set "$DIRECT_SET" dst -m comment --comment "vpnproxi user=$VPN_USER direct-set" -j RETURN
+      iptables -t mangle -I "$CHAIN" 1 -s "$PLUTO_PEER_SOURCEIP" -p tcp -m comment --comment "vpnproxi user=$VPN_USER xray-tcp" -j TPROXY --on-port "$TPROXY_PORT" --tproxy-mark ${TPROXY_MARK}/0xffffffff
+      iptables -t mangle -I "$CHAIN" 1 -s "$PLUTO_PEER_SOURCEIP" -p udp -m comment --comment "vpnproxi user=$VPN_USER xray-udp" -j TPROXY --on-port "$TPROXY_PORT" --tproxy-mark ${TPROXY_MARK}/0xffffffff
+      for subnet in 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 169.254.0.0/16; do
+        iptables -t mangle -I "$CHAIN" 1 -s "$PLUTO_PEER_SOURCEIP" -d "$subnet" -m comment --comment "vpnproxi user=$VPN_USER direct-private" -j RETURN
+      done
+      iptables -t mangle -I "$CHAIN" 1 -s "$PLUTO_PEER_SOURCEIP" -m addrtype --dst-type LOCAL -m comment --comment "vpnproxi user=$VPN_USER direct-local" -j RETURN
       iptables -t mangle -I "$CHAIN" 1 -s "$PLUTO_PEER_SOURCEIP" -p tcp --dport 53 -m comment --comment "vpnproxi user=$VPN_USER direct-dns" -j RETURN
       iptables -t mangle -I "$CHAIN" 1 -s "$PLUTO_PEER_SOURCEIP" -p udp --dport 53 -m comment --comment "vpnproxi user=$VPN_USER direct-dns" -j RETURN
     fi
@@ -301,7 +284,7 @@ case "$PLUTO_VERB" in
     flush_rules
     ;;
 esac
-`, routeMode(state), state.Server.UsersCSVPath, proxySetName, directSetName, state.Server.TProxyMark, state.Server.TProxyMark, state.Server.TProxyMark, state.Server.TProxyMark, tproxyPortCleanupRules(state.Routes.ProxyPorts, state.Server.TProxyMark), state.Server.TProxyMark, state.Server.TProxyMark, proxyPortRules, state.Server.TProxyMark, state.Server.TProxyMark)
+`, routeMode(state), state.Server.UsersCSVPath, proxySetName, directSetName, state.Server.TProxyMark)
 }
 
 func UsersCSV(state core.State) string {
@@ -349,25 +332,12 @@ func FirewallScript(state core.State) string {
 	if gatewayIP == "" {
 		gatewayIP = "10.10.10.1"
 	}
-	proxyCIDRs := staticCIDRRules(state.Routes.ProxyIPs)
-	directCIDRs := staticCIDRRules(state.Routes.DirectIPs)
-	dnsmasqProxyDomains := dnsmasqDomainRules(state.Routes.ProxyDomains)
-	dnsmasqDirectDomains := dnsmasqDomainRules(state.Routes.DirectDomains)
 	dnsmasqServers := upstreamDNSServers(state)
-	proxyGeoIPFiles := selectiveGeoIPListFiles(state)
-	loadRunetDomains := selectiveRunetDomainListEnabled(state)
-	proxyPortRules := subnetTProxyPortRules(state.Routes.ProxyPorts, "$TPROXY_PORT", state.Server.TProxyMark)
-	loadRunetDomainList := "0"
-	if loadRunetDomains {
-		loadRunetDomainList = "1"
-	}
 	return fmt.Sprintf(`#!/bin/bash
 set -euo pipefail
 MODE=%q
 VPN_SUBNET=%q
 VPN_GATEWAY=%q
-GEODATA_DIR=%q
-LOAD_RUNET_DOMAIN_LIST=%q
 TPROXY_PORT=%q
 TPROXY_MARK=%q
 TPROXY_TABLE=%d
@@ -389,12 +359,10 @@ fi
 
 modprobe xt_TPROXY 2>/dev/null || true
 modprobe nf_tproxy_ipv4 2>/dev/null || true
-modprobe xt_set 2>/dev/null || true
 cat >/etc/modules-load.d/vpnproxi-tproxy.conf <<'MODULES'
 xt_TPROXY
 nf_tproxy_ipv4
 nf_tproxy_ipv6
-xt_set
 MODULES
 
 cat >/etc/sysctl.d/99-vpnproxi.conf <<'SYSCTL'
@@ -423,95 +391,9 @@ ip route replace local 0.0.0.0/0 dev lo table "$TPROXY_TABLE"
 ip addr add "$VPN_GATEWAY/32" dev lo 2>/dev/null || true
 
 if [[ "$MODE" != "direct" ]]; then
-  command -v ipset >/dev/null 2>&1 || { echo "ipset is required for selective routing" >&2; exit 1; }
-  command -v dnsmasq >/dev/null 2>&1 || { echo "dnsmasq is required for selective domain routing" >&2; exit 1; }
-fi
-if [[ "$MODE" != "direct" ]]; then
-  ipset create "$PROXY_SET" hash:net family inet hashsize 65536 maxelem 1048576 -exist
-  ipset create "$DIRECT_SET" hash:net family inet hashsize 1024 maxelem 65536 -exist
-  ipset destroy "$PROXY_SET_NEXT" 2>/dev/null || true
-  ipset destroy "$DIRECT_SET_NEXT" 2>/dev/null || true
-
-  proxy_restore=$(mktemp)
-  direct_restore=$(mktemp)
-  cleanup_ipset_restore(){ rm -f "$proxy_restore" "$direct_restore"; }
-  trap cleanup_ipset_restore EXIT
-
-  {
-    printf 'create %%s hash:net family inet hashsize 65536 maxelem 1048576 -exist\n' "$PROXY_SET_NEXT"
-    printf 'flush %%s\n' "$PROXY_SET_NEXT"
-  } >"$proxy_restore"
-  {
-    printf 'create %%s hash:net family inet hashsize 1024 maxelem 65536 -exist\n' "$DIRECT_SET_NEXT"
-    printf 'flush %%s\n' "$DIRECT_SET_NEXT"
-  } >"$direct_restore"
-
-  valid_ipv4_cidr() {
-    local value="$1"
-    local ip
-    local mask
-    local octet
-    local -a octets
-    [[ "$value" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}(/[0-9]{1,2})?$ ]] || return 1
-    ip="${value%%/*}"
-    mask="32"
-    if [[ "$value" == */* ]]; then
-      mask="${value##*/}"
-    fi
-    [[ "$mask" =~ ^[0-9]{1,2}$ ]] || return 1
-    (( 10#$mask <= 32 )) || return 1
-    IFS=. read -r -a octets <<<"$ip"
-    [[ "${#octets[@]}" -eq 4 ]] || return 1
-    for octet in "${octets[@]}"; do
-      [[ "$octet" =~ ^[0-9]{1,3}$ ]] || return 1
-      (( 10#$octet <= 255 )) || return 1
-    done
-  }
-
-  append_ipset_entry() {
-    local restore_file="$1"
-    local set_name="$2"
-    local cidr="$3"
-    [[ -z "$cidr" ]] && return 0
-    valid_ipv4_cidr "$cidr" || return 0
-    printf 'add %%s %%s -exist\n' "$set_name" "$cidr" >>"$restore_file"
-  }
-
-  while IFS= read -r cidr; do
-    append_ipset_entry "$proxy_restore" "$PROXY_SET_NEXT" "$cidr"
-  done <<'VPNPROXI_PROXY_CIDRS'
-%s
-VPNPROXI_PROXY_CIDRS
-
-  while IFS= read -r cidr; do
-    append_ipset_entry "$direct_restore" "$DIRECT_SET_NEXT" "$cidr"
-  done <<'VPNPROXI_DIRECT_CIDRS'
-%s
-VPNPROXI_DIRECT_CIDRS
-
-  while IFS= read -r name; do
-    [[ -z "$name" ]] && continue
-    file="$GEODATA_DIR/$name"
-    [[ -r "$file" ]] || continue
-    grep -E '^[0-9]+(\.[0-9]+){3}(/[0-9]+)?$' "$file" | while IFS= read -r cidr; do
-      append_ipset_entry "$proxy_restore" "$PROXY_SET_NEXT" "$cidr"
-    done
-  done <<'VPNPROXI_PROXY_GEOIP_FILES'
-%s
-VPNPROXI_PROXY_GEOIP_FILES
-
-  ipset restore -exist <"$proxy_restore"
-  ipset restore -exist <"$direct_restore"
-  ipset list "$PROXY_SET_NEXT" >/dev/null
-  ipset list "$DIRECT_SET_NEXT" >/dev/null
-  ipset swap "$PROXY_SET_NEXT" "$PROXY_SET"
-  ipset swap "$DIRECT_SET_NEXT" "$DIRECT_SET"
-  ipset destroy "$PROXY_SET_NEXT" 2>/dev/null || true
-  ipset destroy "$DIRECT_SET_NEXT" 2>/dev/null || true
-fi
-
-if [[ "$MODE" != "direct" ]]; then
+  command -v dnsmasq >/dev/null 2>&1 || { echo "dnsmasq is required for the VPN DNS cache" >&2; exit 1; }
   install -d -m 0755 /usr/local/etc/vpnproxi
+  rm -f /usr/local/etc/vpnproxi/dnsmasq-routes.conf /usr/local/etc/vpnproxi/dnsmasq-direct-domains.txt
   cat >/usr/local/etc/vpnproxi/dnsmasq.conf <<DNSMASQ
 listen-address=$VPN_GATEWAY
 bind-interfaces
@@ -519,52 +401,11 @@ no-hosts
 no-resolv
 cache-size=10000
 dns-forward-max=1000
-conf-file=/usr/local/etc/vpnproxi/dnsmasq-routes.conf
 %s
 DNSMASQ
-  cat >/usr/local/etc/vpnproxi/dnsmasq-direct-domains.txt <<'VPNPROXI_DIRECT_DOMAINS'
-%s
-VPNPROXI_DIRECT_DOMAINS
-  cat >/usr/local/etc/vpnproxi/dnsmasq-routes.conf <<DNSROUTES
-%s
-%s
-DNSROUTES
-  if [[ "$LOAD_RUNET_DOMAIN_LIST" == "1" && -r "$GEODATA_DIR/ru-blocked-all.txt" ]]; then
-    awk -v set="$PROXY_SET" '
-      FILENAME == ARGV[1] {
-        domain = tolower($0)
-        if (domain != "") {
-          direct_domains[domain] = 1
-        }
-        next
-      }
-      function is_direct_or_subdomain(domain, candidate, separator) {
-        candidate = tolower(domain)
-        while (candidate != "") {
-          if (candidate in direct_domains) {
-            return 1
-          }
-          separator = index(candidate, ".")
-          if (separator == 0) {
-            break
-          }
-          candidate = substr(candidate, separator + 1)
-        }
-        return 0
-      }
-      /^domain:/ || /^full:/ {
-        domain = $0
-        sub(/^domain:/, "", domain)
-        sub(/^full:/, "", domain)
-        if (domain != "" && domain !~ /^regexp:/ && domain !~ /^geosite:/ && domain ~ /^[A-Za-z0-9._*-]+$/ && !is_direct_or_subdomain(domain)) {
-          printf "ipset=/%%s/%%s\n", domain, set
-        }
-      }
-    ' /usr/local/etc/vpnproxi/dnsmasq-direct-domains.txt "$GEODATA_DIR/ru-blocked-all.txt" >>/usr/local/etc/vpnproxi/dnsmasq-routes.conf
-  fi
   cat >/etc/systemd/system/vpnproxi-dnsmasq.service <<'DNSMASQ_SERVICE'
 [Unit]
-Description=VPNproxi selective routing DNS resolver
+Description=VPNproxi local DNS cache
 After=network-online.target
 Wants=network-online.target
 
@@ -582,6 +423,7 @@ DNSMASQ_SERVICE
   systemctl restart vpnproxi-dnsmasq
 else
   systemctl stop vpnproxi-dnsmasq 2>/dev/null || true
+  rm -f /usr/local/etc/vpnproxi/dnsmasq-routes.conf /usr/local/etc/vpnproxi/dnsmasq-direct-domains.txt
 fi
 
 iptables -t mangle -N "$CHAIN" 2>/dev/null || true
@@ -630,37 +472,31 @@ iptables -t mangle -S PREROUTING 2>/dev/null \
   | while IFS= read -r rule; do iptables -t mangle $rule 2>/dev/null || true; done \
   || true
 
-if [[ "$MODE" == "direct" ]]; then
-  iptables -t mangle -A "$CHAIN" -s "$VPN_SUBNET" -j RETURN
-  iptables -t nat -A "$REDIRECT_CHAIN" -s "$VPN_SUBNET" -j RETURN
-elif [[ "$MODE" == "selective" ]]; then
-  iptables -I INPUT 1 -s "$VPN_SUBNET" -d "$VPN_GATEWAY" -p udp --dport 53 -j ACCEPT
-  iptables -I INPUT 2 -s "$VPN_SUBNET" -d "$VPN_GATEWAY" -p tcp --dport 53 -j ACCEPT
-  iptables -t mangle -A "$CHAIN" -s "$VPN_SUBNET" -p udp --dport 53 -j RETURN
-  iptables -t mangle -A "$CHAIN" -s "$VPN_SUBNET" -p tcp --dport 53 -j RETURN
-  iptables -t mangle -A "$CHAIN" -s "$VPN_SUBNET" -m set --match-set "$DIRECT_SET" dst -j RETURN
-  iptables -t mangle -A "$CHAIN" -s "$VPN_SUBNET" -p udp -m set --match-set "$PROXY_SET" dst -j TPROXY --on-port "$TPROXY_PORT" --tproxy-mark ${TPROXY_MARK}/0xffffffff
-  iptables -t mangle -A "$CHAIN" -s "$VPN_SUBNET" -p tcp -m set --match-set "$PROXY_SET" dst -j TPROXY --on-port "$TPROXY_PORT" --tproxy-mark ${TPROXY_MARK}/0xffffffff
-%s
-  iptables -I INPUT 1 -s "$VPN_SUBNET" -m mark --mark ${TPROXY_MARK}/0xffffffff -j ACCEPT
-else
-  iptables -I INPUT 1 -s "$VPN_SUBNET" -d "$VPN_GATEWAY" -p udp --dport 53 -j ACCEPT
-  iptables -I INPUT 2 -s "$VPN_SUBNET" -d "$VPN_GATEWAY" -p tcp --dport 53 -j ACCEPT
-  iptables -t mangle -A "$CHAIN" -s "$VPN_SUBNET" -p udp --dport 53 -j RETURN
-  iptables -t mangle -A "$CHAIN" -s "$VPN_SUBNET" -p tcp --dport 53 -j RETURN
-  iptables -t mangle -A "$CHAIN" -s "$VPN_SUBNET" -m set --match-set "$DIRECT_SET" dst -j RETURN
-  iptables -t mangle -A "$CHAIN" -s "$VPN_SUBNET" -p udp -j TPROXY --on-port "$TPROXY_PORT" --tproxy-mark ${TPROXY_MARK}/0xffffffff
-  iptables -t mangle -A "$CHAIN" -s "$VPN_SUBNET" -p tcp -j TPROXY --on-port "$TPROXY_PORT" --tproxy-mark ${TPROXY_MARK}/0xffffffff
-  iptables -I INPUT 1 -s "$VPN_SUBNET" -m mark --mark ${TPROXY_MARK}/0xffffffff -j ACCEPT
-fi
-
-if [[ "$MODE" == "direct" ]] && command -v ipset >/dev/null 2>&1; then
+if command -v ipset >/dev/null 2>&1; then
   ipset destroy "$PROXY_SET_NEXT" 2>/dev/null || true
   ipset destroy "$DIRECT_SET_NEXT" 2>/dev/null || true
   ipset flush "$PROXY_SET" 2>/dev/null || true
   ipset flush "$DIRECT_SET" 2>/dev/null || true
   ipset destroy "$PROXY_SET" 2>/dev/null || true
   ipset destroy "$DIRECT_SET" 2>/dev/null || true
+fi
+
+if [[ "$MODE" == "direct" ]]; then
+  iptables -t mangle -A "$CHAIN" -s "$VPN_SUBNET" -j RETURN
+  iptables -t nat -A "$REDIRECT_CHAIN" -s "$VPN_SUBNET" -j RETURN
+else
+  iptables -I INPUT 1 -s "$VPN_SUBNET" -d "$VPN_GATEWAY" -p udp --dport 53 -j ACCEPT
+  iptables -I INPUT 2 -s "$VPN_SUBNET" -d "$VPN_GATEWAY" -p tcp --dport 53 -j ACCEPT
+  iptables -I INPUT 1 -s "$VPN_SUBNET" -m mark --mark ${TPROXY_MARK}/0xffffffff -j ACCEPT
+  iptables -t mangle -A "$CHAIN" -s "$VPN_SUBNET" -p udp --dport 53 -j RETURN
+  iptables -t mangle -A "$CHAIN" -s "$VPN_SUBNET" -p tcp --dport 53 -j RETURN
+  iptables -t mangle -A "$CHAIN" -s "$VPN_SUBNET" -m addrtype --dst-type LOCAL -j RETURN
+  iptables -t mangle -A "$CHAIN" -s "$VPN_SUBNET" -d 10.0.0.0/8 -j RETURN
+  iptables -t mangle -A "$CHAIN" -s "$VPN_SUBNET" -d 172.16.0.0/12 -j RETURN
+  iptables -t mangle -A "$CHAIN" -s "$VPN_SUBNET" -d 192.168.0.0/16 -j RETURN
+  iptables -t mangle -A "$CHAIN" -s "$VPN_SUBNET" -d 169.254.0.0/16 -j RETURN
+  iptables -t mangle -A "$CHAIN" -s "$VPN_SUBNET" -p udp -j TPROXY --on-port "$TPROXY_PORT" --tproxy-mark ${TPROXY_MARK}/0xffffffff
+  iptables -t mangle -A "$CHAIN" -s "$VPN_SUBNET" -p tcp -j TPROXY --on-port "$TPROXY_PORT" --tproxy-mark ${TPROXY_MARK}/0xffffffff
 fi
 
 iptables -t nat -C POSTROUTING -s "$VPN_SUBNET" -o "$WAN_IFACE" -j MASQUERADE 2>/dev/null \
@@ -671,7 +507,7 @@ iptables -I FORWARD 1 -s "$VPN_SUBNET" -o "$WAN_IFACE" -j ACCEPT
 iptables -I FORWARD 2 -d "$VPN_SUBNET" -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
 iptables -t mangle -I FORWARD 1 -s "$VPN_SUBNET" -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
 iptables -t mangle -I FORWARD 2 -d "$VPN_SUBNET" -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
-`, routeMode(state), state.Server.VPNSubnet, gatewayIP, state.Server.GeodataDir, loadRunetDomainList, fmt.Sprintf("%d", state.Server.TProxyPort), state.Server.TProxyMark, state.Server.TProxyTable, proxySetName, directSetName, shellHereDocLines(proxyCIDRs), shellHereDocLines(directCIDRs), shellHereDocLines(proxyGeoIPFiles), dnsmasqServerLines(dnsmasqServers), shellHereDocLines(dnsmasqDirectDomains), dnsmasqIPSetLines(dnsmasqProxyDomains, proxySetName), dnsmasqIPSetLines(dnsmasqDirectDomains, directSetName), proxyPortRules)
+`, routeMode(state), state.Server.VPNSubnet, gatewayIP, fmt.Sprintf("%d", state.Server.TProxyPort), state.Server.TProxyMark, state.Server.TProxyTable, proxySetName, directSetName, dnsmasqServerLines(dnsmasqServers))
 }
 
 func RoutingScript(state core.State) string {
@@ -692,15 +528,15 @@ ip route replace local 0.0.0.0/0 dev lo table "$TPROXY_TABLE"
 
 func GeodataScript(state core.State) string {
 	downloadXrayDat := "0"
-	if state.Routes.Mode == "force_proxy" && state.Routes.UseRunetGeodata {
+	if requiresXrayGeodata(state) {
 		downloadXrayDat = "1"
 	}
-	textLists := selectiveTextListDownloads(state)
 	return fmt.Sprintf(`#!/bin/bash
 set -euo pipefail
 SHARE_DIR=%q
 DOWNLOAD_XRAY_DAT=%q
 mkdir -p "$SHARE_DIR"
+rm -f "$SHARE_DIR/ru-blocked.txt" "$SHARE_DIR/ru-blocked-community.txt" "$SHARE_DIR/telegram.txt" "$SHARE_DIR/ru-blocked-all.txt"
 tmp_geoip=$(mktemp)
 tmp_geosite=$(mktemp)
 cleanup(){ rm -f "$tmp_geoip" "$tmp_geosite"; }
@@ -726,30 +562,7 @@ if [[ "$DOWNLOAD_XRAY_DAT" == "1" ]]; then
     systemctl restart xray 2>/dev/null || true
   fi
 fi
-fetch_text_list() {
-  local name="$1"
-  local url="$2"
-  local tmp
-  if is_fresh "$SHARE_DIR/$name"; then
-    return 0
-  fi
-  tmp=$(mktemp)
-  if curl "${CURL_FLAGS[@]}" -o "$tmp" "$url"; then
-    install -m 0644 "$tmp" "$SHARE_DIR/$name"
-  elif [[ -r "$SHARE_DIR/$name" ]]; then
-    echo "warning: failed to refresh $name, keeping existing file" >&2
-  else
-    echo "error: failed to download required list $name" >&2
-    rm -f "$tmp"
-    return 1
-  fi
-  rm -f "$tmp"
-}
-%s
-if [[ -x /usr/local/bin/vpnproxi-firewall.sh ]]; then
-  /usr/local/bin/vpnproxi-firewall.sh
-fi
-`, state.Server.GeodataDir, downloadXrayDat, geodataFetchCommands(textLists))
+`, state.Server.GeodataDir, downloadXrayDat)
 }
 
 func routeMode(state core.State) string {
@@ -841,96 +654,27 @@ func ipv4FromUint32(value uint32) string {
 	return net.IP(raw[:]).String()
 }
 
-func staticCIDRRules(values []string) []string {
-	var out []string
-	for _, value := range values {
-		value = strings.TrimSpace(value)
-		if value == "" || strings.HasPrefix(value, "geoip:") {
-			continue
-		}
-		out = append(out, value)
+func requiresXrayGeodata(state core.State) bool {
+	if routeMode(state) == "direct" {
+		return false
 	}
-	return out
-}
-
-func dnsmasqDomainRules(values []string) []string {
-	var out []string
-	for _, value := range values {
-		value = strings.TrimSpace(value)
-		value = strings.TrimPrefix(value, "domain:")
-		value = strings.TrimPrefix(value, "full:")
-		if value == "" || strings.HasPrefix(value, "regexp:") || strings.HasPrefix(value, "geosite:") {
-			continue
-		}
-		out = append(out, value)
-	}
-	return out
-}
-
-func selectiveTextListDownloads(state core.State) []textListSource {
-	needed := selectiveTextListNeeds(state)
-	out := make([]textListSource, 0, len(runetTextListSources))
-	for _, source := range runetTextListSources {
-		if needed[source.Name] {
-			out = append(out, source)
-		}
-	}
-	return out
-}
-
-func selectiveTextListNeeds(state core.State) map[string]bool {
-	needed := map[string]bool{}
-	if state.Routes.UseRunetGeodata {
-		needed[textRuBlocked] = true
-		needed[textRuCommunity] = true
-		needed[textTelegram] = true
-		needed[textRuDomains] = true
-	}
-	for _, value := range state.Routes.ProxyIPs {
-		switch strings.ToLower(strings.TrimSpace(value)) {
-		case "geoip:ru-blocked":
-			needed[textRuBlocked] = true
-		case "geoip:ru-blocked-community":
-			needed[textRuCommunity] = true
-		case "geoip:telegram":
-			needed[textTelegram] = true
-		}
-	}
-	if selectiveRunetDomainListEnabled(state) {
-		needed[textRuDomains] = true
-	}
-	return needed
-}
-
-func selectiveGeoIPListFiles(state core.State) []string {
-	needed := selectiveTextListNeeds(state)
-	files := make([]string, 0, 3)
-	for _, name := range []string{textRuBlocked, textRuCommunity, textTelegram} {
-		if needed[name] {
-			files = append(files, name)
-		}
-	}
-	return files
-}
-
-func selectiveRunetDomainListEnabled(state core.State) bool {
 	if state.Routes.UseRunetGeodata {
 		return true
 	}
-	for _, value := range state.Routes.ProxyDomains {
-		if strings.EqualFold(strings.TrimSpace(value), "geosite:ru-blocked-all") {
-			return true
+	for _, values := range [][]string{
+		state.Routes.ProxyDomains,
+		state.Routes.DirectDomains,
+		state.Routes.ProxyIPs,
+		state.Routes.DirectIPs,
+	} {
+		for _, value := range values {
+			value = strings.ToLower(strings.TrimSpace(value))
+			if strings.HasPrefix(value, "geosite:") || strings.HasPrefix(value, "geoip:") {
+				return true
+			}
 		}
 	}
 	return false
-}
-
-func geodataFetchCommands(sources []textListSource) string {
-	var b strings.Builder
-	for _, source := range sources {
-		fmt.Fprintf(&b, "fetch_text_list %q %q\n", source.Name, source.URL)
-	}
-	return strings.TrimRight(b.String(), "\n")
 }
 
 func upstreamDNSServers(state core.State) []string {
@@ -948,58 +692,10 @@ func upstreamDNSServers(state core.State) []string {
 	return out
 }
 
-func shellHereDocLines(values []string) string {
-	return strings.Join(values, "\n")
-}
-
 func dnsmasqServerLines(values []string) string {
 	var b strings.Builder
 	for _, server := range values {
 		fmt.Fprintf(&b, "server=%s\n", server)
-	}
-	return strings.TrimRight(b.String(), "\n")
-}
-
-func dnsmasqIPSetLines(domains []string, setName string) string {
-	var b strings.Builder
-	for _, domain := range domains {
-		fmt.Fprintf(&b, "ipset=/%s/%s\n", domain, setName)
-	}
-	return strings.TrimRight(b.String(), "\n")
-}
-
-func subnetTProxyPortRules(ports []int, tproxyPort, mark string) string {
-	var b strings.Builder
-	for _, port := range ports {
-		if port < 1 || port > 65535 {
-			continue
-		}
-		fmt.Fprintf(&b, "  iptables -t mangle -A \"$CHAIN\" -s \"$VPN_SUBNET\" -p tcp --dport %d -j TPROXY --on-port %s --tproxy-mark %s/0xffffffff\n", port, tproxyPort, mark)
-		fmt.Fprintf(&b, "  iptables -t mangle -A \"$CHAIN\" -s \"$VPN_SUBNET\" -p udp --dport %d -j TPROXY --on-port %s --tproxy-mark %s/0xffffffff\n", port, tproxyPort, mark)
-	}
-	return strings.TrimRight(b.String(), "\n")
-}
-
-func tproxyPortRules(ports []int, tproxyPort, mark string) string {
-	var b strings.Builder
-	for _, port := range ports {
-		if port < 1 || port > 65535 {
-			continue
-		}
-		fmt.Fprintf(&b, "      iptables -t mangle -I \"$CHAIN\" 1 -s \"$PLUTO_PEER_SOURCEIP\" -p tcp --dport %d -m comment --comment \"vpnproxi user=$VPN_USER xray-port-tcp-%d\" -j TPROXY --on-port %s --tproxy-mark %s/0xffffffff\n", port, port, tproxyPort, mark)
-		fmt.Fprintf(&b, "      iptables -t mangle -I \"$CHAIN\" 1 -s \"$PLUTO_PEER_SOURCEIP\" -p udp --dport %d -m comment --comment \"vpnproxi user=$VPN_USER xray-port-udp-%d\" -j TPROXY --on-port %s --tproxy-mark %s/0xffffffff\n", port, port, tproxyPort, mark)
-	}
-	return strings.TrimRight(b.String(), "\n")
-}
-
-func tproxyPortCleanupRules(ports []int, mark string) string {
-	var b strings.Builder
-	for _, port := range ports {
-		if port < 1 || port > 65535 {
-			continue
-		}
-		fmt.Fprintf(&b, "  while iptables -t mangle -D \"$CHAIN\" -s \"$PLUTO_PEER_SOURCEIP\" -p tcp --dport %d -m comment --comment \"vpnproxi user=$VPN_USER xray-port-tcp-%d\" -j TPROXY --on-port \"$TPROXY_PORT\" --tproxy-mark %s/0xffffffff 2>/dev/null; do :; done\n", port, port, mark)
-		fmt.Fprintf(&b, "  while iptables -t mangle -D \"$CHAIN\" -s \"$PLUTO_PEER_SOURCEIP\" -p udp --dport %d -m comment --comment \"vpnproxi user=$VPN_USER xray-port-udp-%d\" -j TPROXY --on-port \"$TPROXY_PORT\" --tproxy-mark %s/0xffffffff 2>/dev/null; do :; done\n", port, port, mark)
 	}
 	return strings.TrimRight(b.String(), "\n")
 }

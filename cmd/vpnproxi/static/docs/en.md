@@ -83,42 +83,36 @@ The link becomes the external Xray outbound. It is used only in `Selective Xray`
 Routing mode defines what happens to IPsec client traffic:
 
 - `Direct NAT` is the stable production mode. Traffic goes out through gateway NAT and Xray is not in the datapath.
-- `Selective Xray` sends only proxy-rule matches through the external outbound. Linux firewall makes the decision through `ipset` and the project-scoped `vpnproxi-dnsmasq`, so normal direct traffic stays on kernel NAT and does not pass through Xray.
+- `Selective Xray` transparently sends internet TCP/UDP to the local Xray process for classification. Only proxy-rule matches use the external outbound; the final rule sends everything else direct.
 - `Force Xray` sends all client traffic through the external outbound except explicit direct overrides. Local DNS stays direct so domain resolution remains stable.
 
 In `Selective Xray`, traffic goes through the external outbound when it matches proxy rules:
 
-- Always proxy domains: `domain:` and `full:` rules
-- Always proxy IP/CIDR: literal IPv4 addresses, CIDR ranges, and supported runetfreedom-backed `geoip:` rules
+- Always proxy domains: Xray `domain:`, `full:`, `regexp:`, and `geosite:` rules
+- Always proxy IP/CIDR: literal IP addresses, CIDR ranges, and `geoip:` rules
 - Always proxy ports
 - Runet blocked list rules
 
-Selective mode does not evaluate arbitrary Xray `regexp:`, `geosite:` or `geoip:` categories because Xray is no longer the full traffic decision engine in this mode. Use explicit domains/IPs, the official runetfreedom text lists, or switch to `Force Xray` when arbitrary Xray categories are required.
-
-Direct rules override proxy rules. Use them for banks, private resources, internal networks, and anything that must stay local.
+Direct rules override proxy rules. DNS to the gateway and private home/service subnets bypass Xray.
 
 ## Runet blocked list source
 
-When `Runet blocked lists` is enabled, VPNproxi uses the official runetfreedom release data. In `Selective Xray`, routing is driven by text domain/IP lists that can be consumed by `vpnproxi-dnsmasq` and kernel `ipset`. In `Force Xray`, VPNproxi also keeps `geosite.dat`/`geoip.dat` for Xray-compatible routing.
+When `Runet blocked lists` is enabled, VPNproxi uses the official runetfreedom Xray release data in both `Selective Xray` and `Force Xray`.
 
 This toggle uses runetfreedom blocked datasets and is refreshed by a systemd timer. The `Host status` panel shows the last successful update time of the loaded lists.
 
-Data files are updated by the generated systemd timer `vpnproxi-geodata.timer`. The timer runs `/usr/local/bin/vpnproxi-geodata-update.sh`, which downloads the latest release:
+Data files are updated by the generated systemd timer `vpnproxi-geodata.timer`. The timer runs `/usr/local/bin/vpnproxi-geodata-update.sh`, which refreshes a matching pair:
 
-- `ru-blocked.txt` from `https://raw.githubusercontent.com/runetfreedom/russia-blocked-geoip/release/text/ru-blocked.txt`
-- `ru-blocked-community.txt` from `https://raw.githubusercontent.com/runetfreedom/russia-blocked-geoip/release/text/ru-blocked-community.txt`
-- `telegram.txt` from `https://raw.githubusercontent.com/runetfreedom/russia-blocked-geoip/release/text/telegram.txt`
-- `ru-blocked-all.txt` from `https://raw.githubusercontent.com/runetfreedom/russia-blocked-geosite/release/ru-blocked-all.txt`
-- `geoip.dat` from `https://raw.githubusercontent.com/runetfreedom/russia-v2ray-rules-dat/release/geoip.dat` when `Force Xray` needs Xray categories
-- `geosite.dat` from `https://raw.githubusercontent.com/runetfreedom/russia-v2ray-rules-dat/release/geosite.dat` when `Force Xray` needs Xray categories
+- `geoip.dat` from `https://raw.githubusercontent.com/runetfreedom/russia-v2ray-rules-dat/release/geoip.dat`
+- `geosite.dat` from `https://raw.githubusercontent.com/runetfreedom/russia-v2ray-rules-dat/release/geosite.dat`
 
-The files are installed into `/usr/local/share/xray`. Text IP lists are loaded into `VPNPROXI_PROXY4`; explicit proxy domain rules and `ru-blocked-all.txt` are added to that set through `vpnproxi-dnsmasq`.
+The files are installed into `/usr/local/share/xray`. Xray restarts after a successful refresh to load the new categories. `vpnproxi-dnsmasq` remains only a small DNS cache and does not decide routes.
 
 ## Traffic statistics
 
 Client counters are accumulated in `/var/lib/vpnproxi/traffic.json`. The file is atomically rewritten and does not grow like a log.
 
-- `In ↓/↑` comes from kernel FORWARD counters for direct NAT traffic.
+- `In ↓/↑` comes from the Xray direct outbound in Selective/Force modes and kernel FORWARD counters for traffic that bypasses Xray.
 - `Out ↓/↑` comes from Xray outbound counters for traffic sent to the external server.
 - Xray restarts, config applies, and host reboots should not clear accumulated values.
 - Values reset only through the `Reset traffic` button.

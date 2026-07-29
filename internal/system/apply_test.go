@@ -163,3 +163,21 @@ func TestRoutingServiceFollowsNetworkRestarts(t *testing.T) {
 		t.Fatalf("routing service must restore the policy route and remain active: %q", unit)
 	}
 }
+
+func TestGeodataStatusPathsUseDatFilesForSelectiveMode(t *testing.T) {
+	t.Parallel()
+
+	state := core.DefaultState()
+	state.Routes.Mode = "selective"
+	state.Routes.UseRunetGeodata = true
+
+	got := geodataStatusPaths(state)
+	if len(got) != 2 || filepath.Base(got[0]) != "geoip.dat" || filepath.Base(got[1]) != "geosite.dat" {
+		t.Fatalf("geodataStatusPaths() = %#v", got)
+	}
+
+	state.Routes.Mode = "direct"
+	if got := geodataStatusPaths(state); len(got) != 0 {
+		t.Fatalf("direct geodataStatusPaths() = %#v", got)
+	}
+}

@@ -806,17 +806,9 @@ function renderStatus(data) {
     rows.push(`${item.name}: ${formatBytes(item.rx)} ↓ / ${formatBytes(item.tx)} ↑`);
   }
   rows.push('', `${t('gatewayRules')}: ${gatewayRulesSummary(data.tproxyChain || '', data.redirectRules || '')}`);
-  rows.push(`${t('kernelProxySet')}: ${ipsetSummary(data.proxySet || '')}`);
   rows.push('', `${t('ipsecSessions')}:`);
   rows.push(cleanSwanText(data.swanSAs || '') || t('noActiveSas'));
   return rows.join('\n');
-}
-
-function ipsetSummary(text) {
-  const members = String(text || '').match(/Number of entries:\s*(\d+)/);
-  if (members) return members[1];
-  const trimmed = String(text || '').trim();
-  return trimmed ? '-' : '0';
 }
 
 function statusValue(value) {

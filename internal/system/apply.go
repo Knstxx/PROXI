@@ -77,17 +77,18 @@ func Apply(state core.State) (Result, error) {
 	if err := runRequired(&res, "systemctl", "enable", "--now", "vpnproxi-certificate-refresh.timer"); err != nil {
 		return res, err
 	}
-	if state.Routes.UseRunetGeodata {
+	if len(geodataStatusPaths(state)) > 0 {
 		if err := runRequired(&res, "/usr/local/bin/vpnproxi-geodata-update.sh"); err != nil {
 			return res, err
 		}
-	} else if err := runRequired(&res, "/usr/local/bin/vpnproxi-firewall.sh"); err != nil {
-		return res, err
 	}
 	if err := validateXrayConfig(&res, state.Server.XrayConfigPath); err != nil {
 		return res, err
 	}
 	if err := runRequired(&res, "systemctl", "restart", "xray"); err != nil {
+		return res, err
+	}
+	if err := runRequired(&res, "/usr/local/bin/vpnproxi-firewall.sh"); err != nil {
 		return res, err
 	}
 	if err := runRequired(&res, "swanctl", "--load-conns"); err != nil {
@@ -138,8 +139,6 @@ func Status() map[string]any {
 		"tproxyChain":     commandText("iptables", "-t", "mangle", "-S", "VPNPROXI_TPROXY"),
 		"tproxyCounters":  commandText("iptables", "-t", "mangle", "-L", "VPNPROXI_TPROXY", "-v", "-n", "-x", "--line-numbers"),
 		"forwardCounters": commandText("iptables-save", "-t", "mangle", "-c"),
-		"proxySet":        commandText("ipset", "list", "VPNPROXI_PROXY4"),
-		"directSet":       commandText("ipset", "list", "VPNPROXI_DIRECT4"),
 		"dnsmasq":         commandText("systemctl", "is-active", "vpnproxi-dnsmasq"),
 		"xrayStats":       commandText("xray", "api", "statsquery", "--server=127.0.0.1:10085", "-pattern", ""),
 		"redirectRules":   commandText("iptables", "-t", "nat", "-S", "VPNPROXI_REDIRECT"),
@@ -204,47 +203,30 @@ func GeodataStatus(state core.State) map[string]any {
 }
 
 func geodataStatusPaths(state core.State) []string {
-	dir := state.Server.GeodataDir
-	needs := map[string]bool{}
-	if state.Routes.UseRunetGeodata {
-		needs["ru-blocked.txt"] = true
-		needs["ru-blocked-community.txt"] = true
-		needs["telegram.txt"] = true
-		needs["ru-blocked-all.txt"] = true
-		if state.Routes.Mode == "force_proxy" {
-			needs["geoip.dat"] = true
-			needs["geosite.dat"] = true
-		}
+	if state.Routes.Mode == "" || state.Routes.Mode == "direct" {
+		return nil
 	}
-	for _, value := range state.Routes.ProxyDomains {
-		if strings.EqualFold(strings.TrimSpace(value), "geosite:ru-blocked-all") {
-			needs["ru-blocked-all.txt"] = true
-			if state.Routes.Mode == "force_proxy" {
-				needs["geosite.dat"] = true
+	needed := state.Routes.UseRunetGeodata
+	for _, values := range [][]string{
+		state.Routes.ProxyDomains,
+		state.Routes.DirectDomains,
+		state.Routes.ProxyIPs,
+		state.Routes.DirectIPs,
+	} {
+		for _, value := range values {
+			value = strings.ToLower(strings.TrimSpace(value))
+			if strings.HasPrefix(value, "geosite:") || strings.HasPrefix(value, "geoip:") {
+				needed = true
 			}
 		}
 	}
-	for _, value := range state.Routes.ProxyIPs {
-		switch strings.ToLower(strings.TrimSpace(value)) {
-		case "geoip:ru-blocked":
-			needs["ru-blocked.txt"] = true
-		case "geoip:ru-blocked-community":
-			needs["ru-blocked-community.txt"] = true
-		case "geoip:telegram":
-			needs["telegram.txt"] = true
-		}
-		if strings.HasPrefix(strings.ToLower(strings.TrimSpace(value)), "geoip:") && state.Routes.Mode == "force_proxy" {
-			needs["geoip.dat"] = true
-		}
+	if !needed {
+		return nil
 	}
-	order := []string{"ru-blocked.txt", "ru-blocked-community.txt", "telegram.txt", "ru-blocked-all.txt", "geoip.dat", "geosite.dat"}
-	paths := make([]string, 0, len(order))
-	for _, name := range order {
-		if needs[name] {
-			paths = append(paths, filepath.Join(dir, name))
-		}
+	return []string{
+		filepath.Join(state.Server.GeodataDir, "geoip.dat"),
+		filepath.Join(state.Server.GeodataDir, "geosite.dat"),
 	}
-	return paths
 }
 
 func atomicWrite(path string, data []byte, mode os.FileMode) error {

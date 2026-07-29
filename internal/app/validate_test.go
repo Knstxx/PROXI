@@ -17,21 +17,13 @@ func TestValidateStateRejectsDomainRuleInjection(t *testing.T) {
 	}
 }
 
-func TestValidateStateRejectsUnsupportedSelectiveProxyRules(t *testing.T) {
+func TestValidateStateAllowsXrayCategoriesInSelectiveMode(t *testing.T) {
 	state := DefaultState()
 	state.Routes.Mode = "selective"
 	state.Outbound = mustTestOutbound()
 	state.Routes.ProxyDomains = []string{"geosite:youtube"}
-
-	err := ValidateState(state)
-	if err == nil || !strings.Contains(err.Error(), "selective mode cannot route") {
-		t.Fatalf("ValidateState() error = %v", err)
-	}
-
-	state.Routes.ProxyDomains = []string{"domain:youtube.com"}
 	state.Routes.ProxyIPs = []string{"geoip:google"}
-	err = ValidateState(state)
-	if err == nil || !strings.Contains(err.Error(), "selective mode cannot route") {
+	if err := ValidateState(state); err != nil {
 		t.Fatalf("ValidateState() error = %v", err)
 	}
 }

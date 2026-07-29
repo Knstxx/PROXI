@@ -148,18 +148,16 @@ The stable production-safe default.
 
 Only matched traffic goes through the external outbound.
 
-Selective mode is kernel-first: Linux keeps normal traffic on direct NAT, while the project-scoped `vpnproxi-dnsmasq` resolver and `ipset` mark only proxy matches for transparent Xray. Xray remains the outbound engine; it is not used as the default datapath for every IPsec packet.
+The gateway transparently passes internet TCP and UDP through the local Xray process so Xray can classify the original destination and, when available, the HTTP/TLS/QUIC domain. This does not mean all traffic uses the external server: only proxy-rule matches use the external outbound, while the final Selective rule is direct.
 
 Proxy matches can come from:
 
-- `Always proxy domains`: `domain:` and `full:` rules
-- `Always proxy IP/CIDR`: literal IPv4 addresses, CIDR ranges, and supported runetfreedom-backed `geoip:` rules
+- `Always proxy domains`: Xray `domain:`, `full:`, `regexp:`, and `geosite:` rules
+- `Always proxy IP/CIDR`: literal IP addresses, CIDR ranges, and `geoip:` rules
 - `Always proxy ports`
 - Runet blocked-list rules
 
-Selective mode does not evaluate arbitrary Xray `regexp:`, `geosite:` or `geoip:` categories because Xray is no longer the full traffic decision engine in this mode. Use explicit domains/IPs, the official runetfreedom text lists, or switch to `Force Xray` when arbitrary Xray categories are required.
-
-Direct rules override proxy rules.
+Direct rules override proxy rules. DNS to the gateway and private home/service subnets bypass Xray.
 
 ### Force Xray
 
@@ -167,23 +165,14 @@ All client traffic goes through the external outbound except explicit direct ove
 
 ## Runet Blocked Lists
 
-When the blocked-list toggle is enabled, VPNproxi uses the official runetfreedom release data.
-
-Selective Xray uses text lists that can be consumed by the kernel routing path:
-
-- `ru-blocked-all.txt`
-- `ru-blocked.txt`
-- `ru-blocked-community.txt`
-- `telegram.txt`
-
-Force Xray also keeps the Xray `.dat` categories:
+When the blocked-list toggle is enabled, VPNproxi uses the official runetfreedom Xray data in both Selective and Force modes:
 
 - `geosite:ru-blocked-all`
 - `geoip:ru-blocked`
 - `geoip:ru-blocked-community`
 - `geoip:telegram`
 
-The lists are refreshed by `vpnproxi-geodata.timer`. The UI host status shows the last loaded update time for the downloaded text domain/IP lists and, when Force Xray is active, `geoip.dat` and `geosite.dat`.
+`vpnproxi-geodata.timer` refreshes `geoip.dat` and `geosite.dat` automatically. Xray is restarted only when the files are stale and a fresh pair has been downloaded. The UI host status shows their last loaded update time.
 
 ## Documentation Map
 
