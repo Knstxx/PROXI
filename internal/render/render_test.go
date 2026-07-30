@@ -90,8 +90,11 @@ func TestXrayConfigContainsTransparentInboundAndOutboundMark(t *testing.T) {
 	if strings.Contains(firewall, `--match-set "$PROXY_SET" dst -j TPROXY`) || strings.Contains(firewall, `conf-file=/usr/local/etc/vpnproxi/dnsmasq-routes.conf`) {
 		t.Fatalf("selective routing must no longer depend on dnsmasq/ipset classification: %s", firewall)
 	}
-	if !strings.Contains(firewall, `dns-forward-max=200`) || !strings.Contains(firewall, `max-tcp-connections=50`) {
+	if !strings.Contains(firewall, `dns-forward-max=150`) || !strings.Contains(firewall, `max-tcp-connections=20`) {
 		t.Fatalf("dnsmasq must bound whole-network DNS bursts: %s", firewall)
+	}
+	if !strings.Contains(firewall, `use-stale-cache=86400`) {
+		t.Fatalf("dnsmasq must serve recently expired cache entries during brief upstream failures: %s", firewall)
 	}
 	if !strings.Contains(firewall, `server=127.0.0.1#5353`) {
 		t.Fatalf("dnsmasq must use Xray's local encrypted DNS upstream: %s", firewall)
@@ -245,10 +248,11 @@ func TestGeneratedShellScriptsHaveValidSyntax(t *testing.T) {
 	state.Outbound = out
 
 	for name, script := range map[string]string{
-		"updown.sh":   Updown(state),
-		"firewall.sh": FirewallScript(state),
-		"geodata.sh":  GeodataScript(state),
-		"routing.sh":  RoutingScript(state),
+		"updown.sh":     Updown(state),
+		"firewall.sh":   FirewallScript(state),
+		"geodata.sh":    GeodataScript(state),
+		"routing.sh":    RoutingScript(state),
+		"dns-health.sh": DNSHealthScript(state),
 	} {
 		path := filepath.Join(t.TempDir(), name)
 		if err := os.WriteFile(path, []byte(script), 0o700); err != nil {
@@ -256,6 +260,24 @@ func TestGeneratedShellScriptsHaveValidSyntax(t *testing.T) {
 		}
 		if out, err := exec.Command("bash", "-n", path).CombinedOutput(); err != nil {
 			t.Fatalf("%s has invalid bash syntax: %v\n%s", name, err, out)
+		}
+	}
+}
+
+func TestDNSHealthScriptUsesConsecutiveFailuresAndRecoveryCooldown(t *testing.T) {
+	state := core.DefaultState()
+	state.Routes.Mode = "selective"
+	script := DNSHealthScript(state)
+	for _, want := range []string{
+		`FAILURE_THRESHOLD=2`,
+		`XRAY_RESTART_COOLDOWN=300`,
+		`vpnproxi-health-${RANDOM}-$(date +%s).example.com`,
+		`status: (NOERROR|NXDOMAIN)`,
+		`systemctl restart vpnproxi-dnsmasq.service`,
+		`systemctl restart xray.service`,
+	} {
+		if !strings.Contains(script, want) {
+			t.Fatalf("DNS health script is missing %q: %s", want, script)
 		}
 	}
 }

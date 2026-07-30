@@ -24,13 +24,14 @@ const (
 )
 
 type Bundle struct {
-	XrayConfig     []byte
-	SwanctlConf    []byte
-	UpdownScript   []byte
-	UsersCSV       []byte
-	GeodataScript  []byte
-	FirewallScript []byte
-	RoutingScript  []byte
+	XrayConfig      []byte
+	SwanctlConf     []byte
+	UpdownScript    []byte
+	UsersCSV        []byte
+	GeodataScript   []byte
+	DNSHealthScript []byte
+	FirewallScript  []byte
+	RoutingScript   []byte
 }
 
 func Build(state core.State) (Bundle, error) {
@@ -39,13 +40,14 @@ func Build(state core.State) (Bundle, error) {
 		return Bundle{}, err
 	}
 	return Bundle{
-		XrayConfig:     xray,
-		SwanctlConf:    []byte(Swanctl(state)),
-		UpdownScript:   []byte(Updown(state)),
-		UsersCSV:       []byte(UsersCSV(state)),
-		GeodataScript:  []byte(GeodataScript(state)),
-		FirewallScript: []byte(FirewallScript(state)),
-		RoutingScript:  []byte(RoutingScript(state)),
+		XrayConfig:      xray,
+		SwanctlConf:     []byte(Swanctl(state)),
+		UpdownScript:    []byte(Updown(state)),
+		UsersCSV:        []byte(UsersCSV(state)),
+		GeodataScript:   []byte(GeodataScript(state)),
+		DNSHealthScript: []byte(DNSHealthScript(state)),
+		FirewallScript:  []byte(FirewallScript(state)),
+		RoutingScript:   []byte(RoutingScript(state)),
 	}, nil
 }
 
@@ -448,9 +450,10 @@ bind-interfaces
 no-hosts
 no-resolv
 cache-size=10000
-dns-forward-max=200
-max-tcp-connections=50
+dns-forward-max=150
+max-tcp-connections=20
 neg-ttl=60
+use-stale-cache=86400
 address=/eokai.com/#
 server=127.0.0.1#%d
 DNSMASQ
@@ -575,6 +578,76 @@ while ip rule delete fwmark "$TPROXY_MARK" table "$TPROXY_TABLE" 2>/dev/null; do
 ip rule add priority "$TPROXY_PRIORITY" fwmark "$TPROXY_MARK" table "$TPROXY_TABLE"
 ip route replace local 0.0.0.0/0 dev lo table "$TPROXY_TABLE"
 `, state.Server.TProxyMark, state.Server.TProxyTable)
+}
+
+func DNSHealthScript(state core.State) string {
+	gatewayIP := vpnGatewayIP(state.Server.VPNSubnet)
+	if gatewayIP == "" {
+		gatewayIP = "10.10.10.1"
+	}
+	return fmt.Sprintf(`#!/bin/bash
+set -euo pipefail
+MODE=%q
+DNS_SERVER="${VPNPROXI_DNS_HEALTH_SERVER:-%s}"
+DNS_PORT="${VPNPROXI_DNS_HEALTH_PORT:-53}"
+STATE_DIR=/run/vpnproxi
+STATE_FILE="$STATE_DIR/dns-health.state"
+LOCK_FILE="$STATE_DIR/dns-health.lock"
+FAILURE_THRESHOLD=2
+XRAY_RESTART_COOLDOWN=300
+
+[[ "$MODE" == "direct" ]] && exit 0
+install -d -m 0755 "$STATE_DIR"
+exec 9>"$LOCK_FILE"
+flock -n 9 || exit 0
+
+if ! command -v dig >/dev/null 2>&1; then
+  logger -t vpnproxi-dns-health "dig is missing; install dnsutils"
+  exit 1
+fi
+
+if ! systemctl is-active --quiet vpnproxi-dnsmasq.service; then
+  logger -t vpnproxi-dns-health "resolver inactive; restarting dnsmasq"
+  systemctl restart vpnproxi-dnsmasq.service
+  exit 0
+fi
+
+failures=0
+recovery_stage=0
+last_xray_restart=0
+if [[ -r "$STATE_FILE" ]]; then
+  read -r saved_failures saved_stage saved_xray_restart < "$STATE_FILE" || true
+  [[ "${saved_failures:-}" =~ ^[0-9]+$ ]] && failures="$saved_failures"
+  [[ "${saved_stage:-}" =~ ^[0-9]+$ ]] && recovery_stage="$saved_stage"
+  [[ "${saved_xray_restart:-}" =~ ^[0-9]+$ ]] && last_xray_restart="$saved_xray_restart"
+fi
+
+probe_name="vpnproxi-health-${RANDOM}-$(date +%%s).example.com"
+probe_output=""
+if probe_output=$(timeout 5s dig +time=3 +tries=1 "@$DNS_SERVER" -p "$DNS_PORT" "$probe_name" A +noall +comments 2>&1) \
+  && grep -Eq 'status: (NOERROR|NXDOMAIN)' <<<"$probe_output"; then
+  printf '0 0 %%s\n' "$last_xray_restart" > "$STATE_FILE"
+  exit 0
+fi
+
+failures=$((failures + 1))
+printf '%%s %%s %%s\n' "$failures" "$recovery_stage" "$last_xray_restart" > "$STATE_FILE"
+logger -t vpnproxi-dns-health "probe failed count=$failures server=$DNS_SERVER port=$DNS_PORT"
+if (( failures < FAILURE_THRESHOLD )); then
+  exit 0
+fi
+
+now=$(date +%%s)
+if (( recovery_stage > 0 && now - last_xray_restart >= XRAY_RESTART_COOLDOWN )); then
+  logger -t vpnproxi-dns-health "persistent DNS failure; restarting Xray and dnsmasq"
+  systemctl restart xray.service
+  last_xray_restart="$now"
+else
+  logger -t vpnproxi-dns-health "DNS failure threshold reached; restarting dnsmasq"
+fi
+systemctl restart vpnproxi-dnsmasq.service
+printf '0 1 %%s\n' "$last_xray_restart" > "$STATE_FILE"
+`, routeMode(state), gatewayIP)
 }
 
 func GeodataScript(state core.State) string {

@@ -24,7 +24,7 @@ if [[ "$(id -u)" != "0" ]]; then
 fi
 
 apt-get update
-apt-get install -y curl ca-certificates openssl iproute2 iptables dnsmasq-base logrotate git golang-go ufw fail2ban unattended-upgrades \
+apt-get install -y curl ca-certificates openssl iproute2 iptables dnsmasq-base dnsutils logrotate git golang-go ufw fail2ban unattended-upgrades \
   strongswan-pki strongswan-swanctl charon-systemd \
   libstrongswan-standard-plugins libstrongswan-extra-plugins libcharon-extra-plugins
 

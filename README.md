@@ -159,6 +159,8 @@ Proxy matches can come from:
 
 Direct rules override proxy rules. DNS to the gateway and private home/service subnets bypass transparent traffic classification. The local dnsmasq cache forwards A/AAAA lookups to Xray, which uses parallel DNS-over-HTTPS through the configured external outbound; this does not change how the resulting site connection is routed.
 
+The resolver serves recently expired cache entries during short upstream failures. `vpnproxi-dns-health.timer` probes an uncached name every 15 seconds; after two consecutive failures it restarts dnsmasq, and persistent failures may restart Xray no more than once every five minutes.
+
 ### Force Xray
 
 All client traffic goes through the external outbound except explicit direct overrides. Clients still use the gateway's local DNS cache; its A/AAAA upstream uses parallel DNS-over-HTTPS through the configured external outbound.

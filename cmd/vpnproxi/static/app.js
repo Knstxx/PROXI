@@ -794,6 +794,7 @@ function renderStatus(data) {
     `${t('xray')}: ${statusValue(data.xray)}`,
     `${t('strongswan')}: ${statusValue(data.strongswan)}`,
     `dnsmasq: ${statusValue(data.dnsmasq)}`,
+    `${t('dnsHealth')}: ${statusValue(data.dnsHealthTimer)}`,
     `${t('routingMode')}: ${routingModeLabel(data.routingMode || serverState?.routes?.mode || 'direct')}`,
     `${t('geodataUpdated')}: ${formatGeodataUpdated(data)}`,
     '',

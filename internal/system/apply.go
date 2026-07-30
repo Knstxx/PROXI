@@ -45,6 +45,7 @@ func Apply(state core.State) (Result, error) {
 		{state.Server.UpdownPath, bundle.UpdownScript, 0o755},
 		{state.Server.UsersCSVPath, bundle.UsersCSV, 0o600},
 		{"/usr/local/bin/vpnproxi-geodata-update.sh", bundle.GeodataScript, 0o755},
+		{"/usr/local/bin/vpnproxi-dns-health.sh", bundle.DNSHealthScript, 0o755},
 		{"/usr/local/bin/vpnproxi-firewall.sh", bundle.FirewallScript, 0o755},
 		{"/usr/local/bin/vpnproxi-routing.sh", bundle.RoutingScript, 0o755},
 		{"/etc/networkd-dispatcher/routable.d/50-vpnproxi-routing", bundle.RoutingScript, 0o755},
@@ -53,6 +54,8 @@ func Apply(state core.State) (Result, error) {
 		{"/etc/systemd/system/vpnproxi-routing.service", []byte(routingServiceUnit()), 0o644},
 		{"/etc/systemd/system/vpnproxi-geodata.service", []byte(geodataServiceUnit()), 0o644},
 		{"/etc/systemd/system/vpnproxi-geodata.timer", []byte(geodataTimerUnit()), 0o644},
+		{"/etc/systemd/system/vpnproxi-dns-health.service", []byte(dnsHealthServiceUnit()), 0o644},
+		{"/etc/systemd/system/vpnproxi-dns-health.timer", []byte(dnsHealthTimerUnit()), 0o644},
 		{"/etc/systemd/system/vpnproxi-certificate-refresh.service", []byte(certificateRefreshServiceUnit()), 0o644},
 		{"/etc/systemd/system/vpnproxi-certificate-refresh.timer", []byte(certificateRefreshTimerUnit()), 0o644},
 	}
@@ -72,6 +75,9 @@ func Apply(state core.State) (Result, error) {
 		return res, err
 	}
 	if err := runRequired(&res, "systemctl", "enable", "--now", "vpnproxi-geodata.timer"); err != nil {
+		return res, err
+	}
+	if err := runRequired(&res, "systemctl", "enable", "--now", "vpnproxi-dns-health.timer"); err != nil {
 		return res, err
 	}
 	if err := runRequired(&res, "systemctl", "enable", "--now", "vpnproxi-certificate-refresh.timer"); err != nil {
@@ -140,6 +146,8 @@ func Status() map[string]any {
 		"tproxyCounters":  commandText("iptables", "-t", "mangle", "-L", "VPNPROXI_TPROXY", "-v", "-n", "-x", "--line-numbers"),
 		"forwardCounters": commandText("iptables-save", "-t", "mangle", "-c"),
 		"dnsmasq":         commandText("systemctl", "is-active", "vpnproxi-dnsmasq"),
+		"dnsHealthTimer":  commandText("systemctl", "is-active", "vpnproxi-dns-health.timer"),
+		"dnsHealthLast":   commandText("systemctl", "show", "vpnproxi-dns-health.service", "-p", "Result", "-p", "ExecMainStatus"),
 		"xrayStats":       commandText("xray", "api", "statsquery", "--server=127.0.0.1:10085", "-pattern", ""),
 		"redirectRules":   commandText("iptables", "-t", "nat", "-S", "VPNPROXI_REDIRECT"),
 		"natRules":        commandText("iptables", "-t", "nat", "-S", "POSTROUTING"),
@@ -475,6 +483,34 @@ Description=Run VPNproxi geodata update daily
 [Timer]
 OnCalendar=daily
 Persistent=true
+
+[Install]
+WantedBy=timers.target
+`
+}
+
+func dnsHealthServiceUnit() string {
+	return `[Unit]
+Description=VPNproxi DNS health check and recovery
+After=xray.service vpnproxi-dnsmasq.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/vpnproxi-dns-health.sh
+TimeoutStartSec=12s
+`
+}
+
+func dnsHealthTimerUnit() string {
+	return `[Unit]
+Description=Check VPNproxi DNS health
+
+[Timer]
+OnBootSec=45s
+OnUnitActiveSec=15s
+AccuracySec=1s
+RandomizedDelaySec=3s
+Unit=vpnproxi-dns-health.service
 
 [Install]
 WantedBy=timers.target
