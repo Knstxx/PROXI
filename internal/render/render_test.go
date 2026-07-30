@@ -273,6 +273,8 @@ func TestDNSHealthScriptUsesConsecutiveFailuresAndRecoveryCooldown(t *testing.T)
 		`XRAY_RESTART_COOLDOWN=300`,
 		`vpnproxi-health-${RANDOM}-$(date +%s).example.com`,
 		`status: (NOERROR|NXDOMAIN)`,
+		`Maximum number of concurrent DNS queries reached`,
+		`queue_saturated`,
 		`systemctl restart vpnproxi-dnsmasq.service`,
 		`systemctl restart xray.service`,
 	} {

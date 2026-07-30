@@ -624,15 +624,24 @@ fi
 
 probe_name="vpnproxi-health-${RANDOM}-$(date +%%s).example.com"
 probe_output=""
+probe_ok=0
+queue_saturated=0
 if probe_output=$(timeout 5s dig +time=3 +tries=1 "@$DNS_SERVER" -p "$DNS_PORT" "$probe_name" A +noall +comments 2>&1) \
   && grep -Eq 'status: (NOERROR|NXDOMAIN)' <<<"$probe_output"; then
+  probe_ok=1
+fi
+overload_output=$(journalctl -t dnsmasq --since '30 seconds ago' \
+  --grep 'Maximum number of concurrent DNS queries reached' -n 1 --output=cat --no-pager 2>/dev/null || true)
+[[ -n "$overload_output" ]] && queue_saturated=1
+
+if (( probe_ok == 1 && queue_saturated == 0 )); then
   printf '0 0 %%s\n' "$last_xray_restart" > "$STATE_FILE"
   exit 0
 fi
 
 failures=$((failures + 1))
 printf '%%s %%s %%s\n' "$failures" "$recovery_stage" "$last_xray_restart" > "$STATE_FILE"
-logger -t vpnproxi-dns-health "probe failed count=$failures server=$DNS_SERVER port=$DNS_PORT"
+logger -t vpnproxi-dns-health "unhealthy count=$failures probe_ok=$probe_ok queue_saturated=$queue_saturated server=$DNS_SERVER port=$DNS_PORT"
 if (( failures < FAILURE_THRESHOLD )); then
   exit 0
 fi
