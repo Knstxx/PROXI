@@ -28,7 +28,7 @@ External exit host:
 - `vpnproxi-apply.service` - reapplies firewall, Xray, and StrongSwan state on boot.
 - `strongswan` - IKEv2/IPsec endpoint.
 - `xray` - transparent TCP/UDP classifier and direct/external outbound engine for Selective and Force modes.
-- `vpnproxi-dnsmasq` - project-scoped DNS cache for IPsec clients; it does not decide traffic routes.
+- `vpnproxi-dnsmasq` - project-scoped DNS cache for IPsec clients; it does not decide traffic routes. In Xray modes it forwards A/AAAA queries to Xray's parallel DNS-over-HTTPS upstream.
 - `vpnproxi-geodata.timer` - automatic runetfreedom `geoip.dat` and `geosite.dat` refresh for Xray routing categories.
 
 ## Important Paths

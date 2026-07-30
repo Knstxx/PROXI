@@ -157,11 +157,11 @@ Proxy matches can come from:
 - `Always proxy ports`
 - Runet blocked-list rules
 
-Direct rules override proxy rules. DNS to the gateway and private home/service subnets bypass Xray.
+Direct rules override proxy rules. DNS to the gateway and private home/service subnets bypass transparent traffic classification. The local dnsmasq cache forwards A/AAAA lookups to Xray, which uses parallel DNS-over-HTTPS through the configured external outbound; this does not change how the resulting site connection is routed.
 
 ### Force Xray
 
-All client traffic goes through the external outbound except explicit direct overrides. Local DNS stays direct to keep resolution stable.
+All client traffic goes through the external outbound except explicit direct overrides. Clients still use the gateway's local DNS cache; its A/AAAA upstream uses parallel DNS-over-HTTPS through the configured external outbound.
 
 ## Runet Blocked Lists
 

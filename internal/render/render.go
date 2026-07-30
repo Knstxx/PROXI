@@ -16,6 +16,9 @@ const (
 	proxyOutboundTag  = "proxy-primary"
 	directOutboundTag = "direct"
 	blockOutboundTag  = "block"
+	dnsInboundTag     = "dns-cache"
+	dnsOutboundTag    = "dns-cache-out"
+	dnsInboundPort    = 5353
 	proxySetName      = "VPNPROXI_PROXY4"
 	directSetName     = "VPNPROXI_DIRECT4"
 )
@@ -52,8 +55,14 @@ func XrayConfig(state core.State) ([]byte, error) {
 	}
 	rules := []map[string]any{
 		{"type": "field", "inboundTag": []string{"api"}, "outboundTag": "api"},
-		{"type": "field", "network": "udp", "port": "53", "outboundTag": directOutboundTag},
 	}
+	if state.Routes.Mode != "direct" {
+		rules = append(rules,
+			map[string]any{"type": "field", "inboundTag": []string{dnsInboundTag}, "outboundTag": dnsOutboundTag},
+			map[string]any{"type": "field", "inboundTag": []string{"dns-upstream"}, "outboundTag": proxyOutboundTag},
+		)
+	}
+	rules = append(rules, map[string]any{"type": "field", "network": "udp", "port": "53", "outboundTag": directOutboundTag})
 	if state.Routes.BlockPrivateIPs {
 		rules = append(rules, map[string]any{
 			"ruleTag":     "block-private",
@@ -97,10 +106,37 @@ func XrayConfig(state core.State) ([]byte, error) {
 			outbounds = append(outbounds, proxyOutbound(state, userProxyOutboundTag(user.Login)))
 		}
 	}
+	if state.Routes.Mode != "direct" {
+		outbounds = append(outbounds, map[string]any{
+			"tag":      dnsOutboundTag,
+			"protocol": "dns",
+			"settings": map[string]any{
+				"rewriteAddress": "1.1.1.1",
+				"rewritePort":    53,
+				"rules": []any{
+					map[string]any{"action": "hijack", "qType": "1,28"},
+					map[string]any{"action": "direct"},
+				},
+			},
+		})
+	}
 	outbounds = append(outbounds, map[string]any{"tag": blockOutboundTag, "protocol": "blackhole"})
 	inbounds := []any{tproxyInbound(tproxyInboundTag, state.Server.TProxyPort)}
 	for i, user := range state.Server.Users {
 		inbounds = append(inbounds, tproxyInbound(userInboundTag(user.Login), userTProxyPort(state, i)))
+	}
+	if state.Routes.Mode != "direct" {
+		inbounds = append(inbounds, map[string]any{
+			"tag":      dnsInboundTag,
+			"listen":   "127.0.0.1",
+			"port":     dnsInboundPort,
+			"protocol": "dokodemo-door",
+			"settings": map[string]any{
+				"address": "1.1.1.1",
+				"port":    53,
+				"network": "tcp,udp",
+			},
+		})
 	}
 	inbounds = append(inbounds, map[string]any{"tag": "api", "listen": "127.0.0.1", "port": 10085, "protocol": "dokodemo-door", "settings": map[string]any{"address": "127.0.0.1"}})
 	config := map[string]any{
@@ -110,6 +146,19 @@ func XrayConfig(state core.State) ([]byte, error) {
 		"stats":    map[string]any{},
 		"routing":  map[string]any{"domainStrategy": "IPIfNonMatch", "rules": rules},
 		"inbounds": inbounds, "outbounds": outbounds,
+	}
+	if state.Routes.Mode != "direct" {
+		config["dns"] = map[string]any{
+			"servers": []any{
+				map[string]any{"address": "https://1.1.1.1/dns-query", "timeoutMs": 2500},
+				map[string]any{"address": "https://8.8.8.8/dns-query", "timeoutMs": 2500},
+			},
+			"tag":                 "dns-upstream",
+			"queryStrategy":       "UseIP",
+			"enableParallelQuery": true,
+			"serveStale":          true,
+			"serveExpiredTTL":     86400,
+		}
 	}
 	return json.MarshalIndent(config, "", "  ")
 }
@@ -332,7 +381,6 @@ func FirewallScript(state core.State) string {
 	if gatewayIP == "" {
 		gatewayIP = "10.10.10.1"
 	}
-	dnsmasqServers := upstreamDNSServers(state)
 	return fmt.Sprintf(`#!/bin/bash
 set -euo pipefail
 MODE=%q
@@ -400,8 +448,11 @@ bind-interfaces
 no-hosts
 no-resolv
 cache-size=10000
-dns-forward-max=1000
-%s
+dns-forward-max=200
+max-tcp-connections=50
+neg-ttl=60
+address=/eokai.com/#
+server=127.0.0.1#%d
 DNSMASQ
   cat >/etc/systemd/system/vpnproxi-dnsmasq.service <<'DNSMASQ_SERVICE'
 [Unit]
@@ -507,7 +558,7 @@ iptables -I FORWARD 1 -s "$VPN_SUBNET" -o "$WAN_IFACE" -j ACCEPT
 iptables -I FORWARD 2 -d "$VPN_SUBNET" -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
 iptables -t mangle -I FORWARD 1 -s "$VPN_SUBNET" -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
 iptables -t mangle -I FORWARD 2 -d "$VPN_SUBNET" -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
-`, routeMode(state), state.Server.VPNSubnet, gatewayIP, fmt.Sprintf("%d", state.Server.TProxyPort), state.Server.TProxyMark, state.Server.TProxyTable, proxySetName, directSetName, dnsmasqServerLines(dnsmasqServers))
+`, routeMode(state), state.Server.VPNSubnet, gatewayIP, fmt.Sprintf("%d", state.Server.TProxyPort), state.Server.TProxyMark, state.Server.TProxyTable, proxySetName, directSetName, dnsInboundPort)
 }
 
 func RoutingScript(state core.State) string {
@@ -675,27 +726,4 @@ func requiresXrayGeodata(state core.State) bool {
 		}
 	}
 	return false
-}
-
-func upstreamDNSServers(state core.State) []string {
-	var out []string
-	for _, server := range state.Server.VPNDNSServers {
-		server = strings.TrimSpace(server)
-		if server == "" || server == vpnGatewayIP(state.Server.VPNSubnet) {
-			continue
-		}
-		out = append(out, server)
-	}
-	if len(out) == 0 {
-		return []string{"8.8.8.8", "1.1.1.1"}
-	}
-	return out
-}
-
-func dnsmasqServerLines(values []string) string {
-	var b strings.Builder
-	for _, server := range values {
-		fmt.Fprintf(&b, "server=%s\n", server)
-	}
-	return strings.TrimRight(b.String(), "\n")
 }

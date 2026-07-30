@@ -84,7 +84,7 @@ Routing mode defines what happens to IPsec client traffic:
 
 - `Direct NAT` is the stable production mode. Traffic goes out through gateway NAT and Xray is not in the datapath.
 - `Selective Xray` transparently sends internet TCP/UDP to the local Xray process for classification. Only proxy-rule matches use the external outbound; the final rule sends everything else direct.
-- `Force Xray` sends all client traffic through the external outbound except explicit direct overrides. Local DNS stays direct so domain resolution remains stable.
+- `Force Xray` sends all client traffic through the external outbound except explicit direct overrides. Clients keep using the gateway's local DNS cache; its A/AAAA upstream uses parallel DNS-over-HTTPS through the configured external outbound.
 
 In `Selective Xray`, traffic goes through the external outbound when it matches proxy rules:
 
@@ -93,7 +93,7 @@ In `Selective Xray`, traffic goes through the external outbound when it matches 
 - Always proxy ports
 - Runet blocked list rules
 
-Direct rules override proxy rules. DNS to the gateway and private home/service subnets bypass Xray.
+Direct rules override proxy rules. DNS to the gateway and private home/service subnets bypass transparent traffic classification. The local dnsmasq cache forwards A/AAAA lookups to Xray, which uses parallel DNS-over-HTTPS through the configured external outbound; this does not change how the resulting site connection is routed.
 
 ## Runet blocked list source
 
@@ -106,7 +106,7 @@ Data files are updated by the generated systemd timer `vpnproxi-geodata.timer`. 
 - `geoip.dat` from `https://raw.githubusercontent.com/runetfreedom/russia-v2ray-rules-dat/release/geoip.dat`
 - `geosite.dat` from `https://raw.githubusercontent.com/runetfreedom/russia-v2ray-rules-dat/release/geosite.dat`
 
-The files are installed into `/usr/local/share/xray`. Xray restarts after a successful refresh to load the new categories. `vpnproxi-dnsmasq` remains only a small DNS cache and does not decide routes.
+The files are installed into `/usr/local/share/xray`. Xray restarts after a successful refresh to load the new categories. `vpnproxi-dnsmasq` remains only a small DNS cache and does not decide routes. In Selective and Force modes, A/AAAA upstream lookups use parallel DNS-over-HTTPS through Xray instead of depending on raw UDP/TCP port 53; the cache's pending-query and TCP-connection limits are also bounded.
 
 ## Traffic statistics
 

@@ -90,8 +90,14 @@ func TestXrayConfigContainsTransparentInboundAndOutboundMark(t *testing.T) {
 	if strings.Contains(firewall, `--match-set "$PROXY_SET" dst -j TPROXY`) || strings.Contains(firewall, `conf-file=/usr/local/etc/vpnproxi/dnsmasq-routes.conf`) {
 		t.Fatalf("selective routing must no longer depend on dnsmasq/ipset classification: %s", firewall)
 	}
-	if !strings.Contains(firewall, `dns-forward-max=1000`) {
-		t.Fatalf("dnsmasq must tolerate whole-network DNS bursts: %s", firewall)
+	if !strings.Contains(firewall, `dns-forward-max=200`) || !strings.Contains(firewall, `max-tcp-connections=50`) {
+		t.Fatalf("dnsmasq must bound whole-network DNS bursts: %s", firewall)
+	}
+	if !strings.Contains(firewall, `server=127.0.0.1#5353`) {
+		t.Fatalf("dnsmasq must use Xray's local encrypted DNS upstream: %s", firewall)
+	}
+	if !strings.Contains(firewall, `address=/eokai.com/#`) {
+		t.Fatalf("dnsmasq must answer the known broken delegation locally: %s", firewall)
 	}
 	if !strings.Contains(firewall, `rm -f /usr/local/etc/vpnproxi/dnsmasq-routes.conf`) {
 		t.Fatalf("firewall must remove obsolete large DNS routing artifacts: %s", firewall)
@@ -111,6 +117,12 @@ func TestXrayConfigContainsTransparentInboundAndOutboundMark(t *testing.T) {
 	}
 	if !strings.Contains(firewall, `-d "$VPN_GATEWAY" -p udp --dport 53 -j ACCEPT`) {
 		t.Fatalf("selective firewall must allow client DNS to the local resolver: %s", firewall)
+	}
+	if !strings.Contains(string(raw), `"https://1.1.1.1/dns-query"`) || !strings.Contains(string(raw), `"enableParallelQuery": true`) {
+		t.Fatalf("xray must resolve client A/AAAA queries over parallel DoH: %s", raw)
+	}
+	if !strings.Contains(string(raw), `"tag": "dns-cache"`) || !strings.Contains(string(raw), `"tag": "dns-cache-out"`) {
+		t.Fatalf("xray must expose the local DNS bridge used by dnsmasq: %s", raw)
 	}
 	if !strings.Contains(firewall, `ip rule add fwmark "$TPROXY_MARK" table "$TPROXY_TABLE"`) {
 		t.Fatalf("firewall policy route rule is missing: %s", firewall)
