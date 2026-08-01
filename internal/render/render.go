@@ -449,6 +449,8 @@ listen-address=$VPN_GATEWAY
 bind-interfaces
 no-hosts
 no-resolv
+bogus-priv
+local=/local/
 cache-size=10000
 dns-forward-max=150
 max-tcp-connections=20

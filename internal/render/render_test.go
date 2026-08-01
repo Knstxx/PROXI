@@ -96,6 +96,9 @@ func TestXrayConfigContainsTransparentInboundAndOutboundMark(t *testing.T) {
 	if !strings.Contains(firewall, `use-stale-cache=86400`) {
 		t.Fatalf("dnsmasq must serve recently expired cache entries during brief upstream failures: %s", firewall)
 	}
+	if !strings.Contains(firewall, `bogus-priv`) || !strings.Contains(firewall, `local=/local/`) {
+		t.Fatalf("dnsmasq must terminate private reverse and .local lookups locally: %s", firewall)
+	}
 	if !strings.Contains(firewall, `server=127.0.0.1#5353`) {
 		t.Fatalf("dnsmasq must use Xray's local encrypted DNS upstream: %s", firewall)
 	}
