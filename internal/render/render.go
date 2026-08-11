@@ -398,6 +398,9 @@ PROXY_SET=%q
 DIRECT_SET=%q
 PROXY_SET_NEXT="${PROXY_SET}_NEXT"
 DIRECT_SET_NEXT="${DIRECT_SET}_NEXT"
+install -d -m 0755 /run/vpnproxi
+exec 8>/run/vpnproxi/dns-health.lock
+flock -x 8
 WAN_IFACE=$(ip route show default 0.0.0.0/0 | awk '{print $5; exit}')
 if [[ -z "${WAN_IFACE:-}" ]]; then
   WAN_IFACE=$(ip route | awk '/default/ { print $5; exit }')
@@ -444,6 +447,73 @@ if [[ "$MODE" != "direct" ]]; then
   command -v dnsmasq >/dev/null 2>&1 || { echo "dnsmasq is required for the VPN DNS cache" >&2; exit 1; }
   install -d -m 0755 /usr/local/etc/vpnproxi
   rm -f /usr/local/etc/vpnproxi/dnsmasq-routes.conf /usr/local/etc/vpnproxi/dnsmasq-direct-domains.txt
+  primary_template_next=$(mktemp /usr/local/etc/vpnproxi/.dns-upstreams-primary.XXXXXX)
+  cat >"$primary_template_next" <<DNSMASQ_PRIMARY
+server=127.0.0.1#%d
+DNSMASQ_PRIMARY
+  chmod 0644 "$primary_template_next"
+  mv -f "$primary_template_next" /usr/local/etc/vpnproxi/dns-upstreams-primary.conf
+  cloudflare_template_next=$(mktemp /usr/local/etc/vpnproxi/.dns-upstreams-cloudflare.XXXXXX)
+  cat >"$cloudflare_template_next" <<'DNSMASQ_FALLBACK_CLOUDFLARE'
+server=1.1.1.1#53
+DNSMASQ_FALLBACK_CLOUDFLARE
+  chmod 0644 "$cloudflare_template_next"
+  mv -f "$cloudflare_template_next" /usr/local/etc/vpnproxi/dns-upstreams-fallback-cloudflare.conf
+  google_template_next=$(mktemp /usr/local/etc/vpnproxi/.dns-upstreams-google.XXXXXX)
+  cat >"$google_template_next" <<'DNSMASQ_FALLBACK_GOOGLE'
+server=8.8.8.8#53
+DNSMASQ_FALLBACK_GOOGLE
+  chmod 0644 "$google_template_next"
+  mv -f "$google_template_next" /usr/local/etc/vpnproxi/dns-upstreams-fallback-google.conf
+  initial_upstream_file=/usr/local/etc/vpnproxi/dns-upstreams-primary.conf
+  initial_upstream_mode=primary
+  initial_upstream_applied=primary
+  initial_primary_failures=0
+  initial_all_unavailable=0
+  probe_initial_resolver() {
+    local initial_server="$1"
+    local initial_port="$2"
+    local initial_label="$3"
+    local initial_probe
+    local initial_query_type
+    for initial_query_type in A TXT; do
+      initial_probe="vpnproxi-apply-${initial_label}-${initial_query_type}-${RANDOM}-$(date +%%s).example.com"
+      if ! timeout 4s dig +time=3 +tries=1 "@$initial_server" -p "$initial_port" \
+        "$initial_probe" "$initial_query_type" +noall +comments 2>/dev/null \
+        | grep -Eq 'status: (NOERROR|NXDOMAIN)'; then
+        return 1
+      fi
+    done
+    return 0
+  }
+  if ! probe_initial_resolver 127.0.0.1 %d primary; then
+    initial_primary_failures=1
+    if probe_initial_resolver 1.1.1.1 53 cloudflare; then
+      initial_upstream_file=/usr/local/etc/vpnproxi/dns-upstreams-fallback-cloudflare.conf
+      initial_upstream_mode=fallback
+      initial_upstream_applied=cloudflare
+      initial_primary_failures=0
+    elif probe_initial_resolver 8.8.8.8 53 google; then
+      initial_upstream_file=/usr/local/etc/vpnproxi/dns-upstreams-fallback-google.conf
+      initial_upstream_mode=fallback
+      initial_upstream_applied=google
+      initial_primary_failures=0
+    else
+      initial_all_unavailable=1
+    fi
+  fi
+  install -m 0644 "$initial_upstream_file" /run/vpnproxi/dns-upstreams.conf
+  printf '%%s\n' "$initial_upstream_mode" >/run/vpnproxi/dns-upstream-mode
+  printf '%%s\n' "$initial_upstream_applied" >/run/vpnproxi/dns-upstream-applied
+  rm -f /run/vpnproxi/dns-health.state /run/vpnproxi/dns-upstream.state \
+    /run/vpnproxi/dns-primary-degraded /run/vpnproxi/dns-fallback-unavailable
+  if [[ "$initial_upstream_mode" == "fallback" ]]; then
+    : >/run/vpnproxi/dns-primary-degraded
+  elif (( initial_all_unavailable == 1 )); then
+    : >/run/vpnproxi/dns-primary-degraded
+    : >/run/vpnproxi/dns-fallback-unavailable
+  fi
+  printf '%%s %%s 0 %%s\n' "$initial_upstream_mode" "$initial_primary_failures" "$(date +%%s)" >/run/vpnproxi/dns-upstream.state
   cat >/usr/local/etc/vpnproxi/dnsmasq.conf <<DNSMASQ
 listen-address=$VPN_GATEWAY
 bind-interfaces
@@ -457,7 +527,7 @@ max-tcp-connections=64
 neg-ttl=60
 use-stale-cache=86400
 address=/eokai.com/#
-server=127.0.0.1#%d
+servers-file=/run/vpnproxi/dns-upstreams.conf
 DNSMASQ
   cat >/etc/systemd/system/vpnproxi-dnsmasq.service <<'DNSMASQ_SERVICE'
 [Unit]
@@ -468,6 +538,7 @@ Wants=network-online.target
 [Service]
 Type=simple
 ExecStartPre=/bin/sh -c 'until /usr/sbin/ip -4 -o addr show dev lo | /usr/bin/grep -q " %s/32 "; do /usr/bin/sleep 1; done'
+ExecStartPre=/bin/sh -c 'install -d -m 0755 /run/vpnproxi; test -s /run/vpnproxi/dns-upstreams.conf || install -m 0644 /usr/local/etc/vpnproxi/dns-upstreams-primary.conf /run/vpnproxi/dns-upstreams.conf'
 ExecStart=/usr/sbin/dnsmasq --keep-in-foreground --conf-file=/usr/local/etc/vpnproxi/dnsmasq.conf --pid-file=/run/vpnproxi-dnsmasq.pid
 Restart=on-failure
 RestartSec=2
@@ -481,7 +552,13 @@ DNSMASQ_SERVICE
   systemctl restart vpnproxi-dnsmasq
 else
   systemctl stop vpnproxi-dnsmasq 2>/dev/null || true
-  rm -f /usr/local/etc/vpnproxi/dnsmasq-routes.conf /usr/local/etc/vpnproxi/dnsmasq-direct-domains.txt
+  rm -f /usr/local/etc/vpnproxi/dnsmasq-routes.conf /usr/local/etc/vpnproxi/dnsmasq-direct-domains.txt \
+    /usr/local/etc/vpnproxi/dns-upstreams-primary.conf \
+    /usr/local/etc/vpnproxi/dns-upstreams-fallback-cloudflare.conf \
+    /usr/local/etc/vpnproxi/dns-upstreams-fallback-google.conf \
+    /run/vpnproxi/dns-upstreams.conf /run/vpnproxi/dns-upstream-mode /run/vpnproxi/dns-upstream-applied \
+    /run/vpnproxi/dns-upstream.state \
+    /run/vpnproxi/dns-primary-degraded /run/vpnproxi/dns-fallback-unavailable
 fi
 
 iptables -t mangle -N "$CHAIN" 2>/dev/null || true
@@ -565,7 +642,7 @@ iptables -I FORWARD 1 -s "$VPN_SUBNET" -o "$WAN_IFACE" -j ACCEPT
 iptables -I FORWARD 2 -d "$VPN_SUBNET" -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
 iptables -t mangle -I FORWARD 1 -s "$VPN_SUBNET" -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
 iptables -t mangle -I FORWARD 2 -d "$VPN_SUBNET" -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
-`, routeMode(state), state.Server.VPNSubnet, gatewayIP, fmt.Sprintf("%d", state.Server.TProxyPort), state.Server.TProxyMark, state.Server.TProxyTable, proxySetName, directSetName, dnsInboundPort, gatewayIP)
+`, routeMode(state), state.Server.VPNSubnet, gatewayIP, fmt.Sprintf("%d", state.Server.TProxyPort), state.Server.TProxyMark, state.Server.TProxyTable, proxySetName, directSetName, dnsInboundPort, dnsInboundPort, gatewayIP)
 }
 
 func RoutingScript(state core.State) string {
@@ -594,12 +671,25 @@ set -euo pipefail
 MODE=%q
 DNS_SERVER="${VPNPROXI_DNS_HEALTH_SERVER:-%s}"
 DNS_PORT="${VPNPROXI_DNS_HEALTH_PORT:-53}"
+PRIMARY_DNS_SERVER="${VPNPROXI_DNS_PRIMARY_SERVER:-127.0.0.1}"
+PRIMARY_DNS_PORT="${VPNPROXI_DNS_PRIMARY_PORT:-%d}"
 STATE_DIR=/run/vpnproxi
 STATE_FILE="$STATE_DIR/dns-health.state"
 LOCK_FILE="$STATE_DIR/dns-health.lock"
+PRIMARY_DEGRADED_FILE="$STATE_DIR/dns-primary-degraded"
+UPSTREAM_FILE="$STATE_DIR/dns-upstreams.conf"
+UPSTREAM_MODE_FILE="$STATE_DIR/dns-upstream-mode"
+UPSTREAM_APPLIED_FILE="$STATE_DIR/dns-upstream-applied"
+UPSTREAM_STATE_FILE="$STATE_DIR/dns-upstream.state"
+PRIMARY_UPSTREAM_FILE=/usr/local/etc/vpnproxi/dns-upstreams-primary.conf
+CLOUDFLARE_UPSTREAM_FILE=/usr/local/etc/vpnproxi/dns-upstreams-fallback-cloudflare.conf
+GOOGLE_UPSTREAM_FILE=/usr/local/etc/vpnproxi/dns-upstreams-fallback-google.conf
+FALLBACK_UNAVAILABLE_FILE="$STATE_DIR/dns-fallback-unavailable"
+PRIMARY_FAIL_THRESHOLD="${VPNPROXI_DNS_PRIMARY_FAIL_THRESHOLD:-2}"
+RECOVERY_SUCCESS_THRESHOLD="${VPNPROXI_DNS_RECOVERY_SUCCESS_THRESHOLD:-6}"
+MIN_FALLBACK_DWELL="${VPNPROXI_DNS_MIN_FALLBACK_DWELL:-120}"
 FAILURE_THRESHOLD=2
 DNSMASQ_RESTART_COOLDOWN=120
-XRAY_RESTART_COOLDOWN=300
 
 [[ "$MODE" == "direct" ]] && exit 0
 install -d -m 0755 "$STATE_DIR"
@@ -611,36 +701,314 @@ if ! command -v dig >/dev/null 2>&1; then
   exit 1
 fi
 
-if ! systemctl is-active --quiet vpnproxi-dnsmasq.service; then
-  logger -t vpnproxi-dns-health "resolver inactive; restarting dnsmasq"
-  systemctl restart vpnproxi-dnsmasq.service
-  exit 0
-fi
+activate_upstreams() {
+  local source_file="$1"
+  local desired_mode="$2"
+  local tmp_file
+  local applied_mode
+  local desired_applied
+  if [[ ! -s "$source_file" ]]; then
+    logger -t vpnproxi-dns-health "missing DNS upstream template: $source_file"
+    return 1
+  fi
+  desired_applied="$desired_mode"
+  [[ "$source_file" == "$CLOUDFLARE_UPSTREAM_FILE" ]] && desired_applied=cloudflare
+  [[ "$source_file" == "$GOOGLE_UPSTREAM_FILE" ]] && desired_applied=google
+  applied_mode=$(cat "$UPSTREAM_APPLIED_FILE" 2>/dev/null || true)
+  if cmp -s "$source_file" "$UPSTREAM_FILE" && [[ "$applied_mode" == "$desired_applied" ]]; then
+    return 0
+  fi
+  if ! cmp -s "$source_file" "$UPSTREAM_FILE"; then
+    tmp_file=$(mktemp "$STATE_DIR/dns-upstreams.XXXXXX")
+    install -m 0644 "$source_file" "$tmp_file"
+    mv -f "$tmp_file" "$UPSTREAM_FILE"
+  fi
+  systemctl kill --kill-who=main --signal=HUP vpnproxi-dnsmasq.service
+  printf '%%s\n' "$desired_applied" > "$UPSTREAM_APPLIED_FILE"
+  printf '%%s\n' "$desired_mode" > "$UPSTREAM_MODE_FILE"
+  sleep 0.2
+}
+
+write_upstream_state() {
+  local tmp_file
+  tmp_file=$(mktemp "$STATE_DIR/dns-upstream-state.XXXXXX")
+  printf '%%s %%s %%s %%s\n' "$upstream_mode" "$primary_failures" "$recovery_successes" "$last_switch" > "$tmp_file"
+  chmod 0644 "$tmp_file"
+  mv -f "$tmp_file" "$UPSTREAM_STATE_FILE"
+  printf '%%s\n' "$upstream_mode" > "$UPSTREAM_MODE_FILE"
+}
+
+repair_upstream_template() {
+  local path="$1"
+  local expected="$2"
+  local tmp_file
+  if [[ -r "$path" && $(wc -l < "$path") -eq 1 ]] && grep -qxF "$expected" "$path"; then
+    return 0
+  fi
+  install -d -m 0755 "$(dirname "$path")"
+  tmp_file=$(mktemp "$(dirname "$path")/.dns-upstream-template.XXXXXX")
+  printf '%%s\n' "$expected" > "$tmp_file"
+  chmod 0644 "$tmp_file"
+  mv -f "$tmp_file" "$path"
+  logger -t vpnproxi-dns-health "repaired DNS upstream template: $path"
+}
+
+repair_upstream_templates() {
+  repair_upstream_template "$PRIMARY_UPSTREAM_FILE" 'server=127.0.0.1#%d'
+  repair_upstream_template "$CLOUDFLARE_UPSTREAM_FILE" 'server=1.1.1.1#53'
+  repair_upstream_template "$GOOGLE_UPSTREAM_FILE" 'server=8.8.8.8#53'
+}
+
+select_healthy_fallback() {
+  selected_fallback_file=""
+  selected_fallback_name=""
+  if probe_resolver 1.1.1.1 53 fallback-cloudflare; then
+    selected_fallback_file="$CLOUDFLARE_UPSTREAM_FILE"
+    selected_fallback_name=cloudflare
+    return 0
+  fi
+  if probe_resolver 8.8.8.8 53 fallback-google; then
+    selected_fallback_file="$GOOGLE_UPSTREAM_FILE"
+    selected_fallback_name=google
+    return 0
+  fi
+  return 1
+}
+
+probe_resolver() {
+  local server="$1"
+  local port="$2"
+  local label="$3"
+  local probe_name
+  local output
+  local query_type
+  for query_type in A TXT; do
+    probe_name="vpnproxi-${label}-${query_type}-${RANDOM}-$(date +%%s).example.com"
+    output=""
+    if ! output=$(timeout 4s dig +time=3 +tries=1 "@$server" -p "$port" "$probe_name" "$query_type" +noall +comments 2>&1) \
+      || ! grep -Eq 'status: (NOERROR|NXDOMAIN)' <<<"$output"; then
+      return 1
+    fi
+  done
+  return 0
+}
+
+for value in "$PRIMARY_FAIL_THRESHOLD" "$RECOVERY_SUCCESS_THRESHOLD" "$MIN_FALLBACK_DWELL"; do
+  [[ "$value" =~ ^[0-9]+$ ]] || { logger -t vpnproxi-dns-health "invalid DNS failover threshold"; exit 1; }
+done
+(( 10#$PRIMARY_FAIL_THRESHOLD > 0 && 10#$RECOVERY_SUCCESS_THRESHOLD > 0 && 10#$MIN_FALLBACK_DWELL > 0 )) \
+  || { logger -t vpnproxi-dns-health "DNS failover thresholds and dwell must be greater than zero"; exit 1; }
+PRIMARY_FAIL_THRESHOLD=$((10#$PRIMARY_FAIL_THRESHOLD))
+RECOVERY_SUCCESS_THRESHOLD=$((10#$RECOVERY_SUCCESS_THRESHOLD))
+MIN_FALLBACK_DWELL=$((10#$MIN_FALLBACK_DWELL))
+
+repair_upstream_templates
 
 failures=0
-recovery_stage=0
-last_xray_restart=0
 last_dnsmasq_restart=0
 if [[ -r "$STATE_FILE" ]]; then
   read -r saved_failures saved_stage saved_xray_restart saved_dnsmasq_restart < "$STATE_FILE" || true
   [[ "${saved_failures:-}" =~ ^[0-9]+$ ]] && failures="$saved_failures"
-  [[ "${saved_stage:-}" =~ ^[0-9]+$ ]] && recovery_stage="$saved_stage"
-  [[ "${saved_xray_restart:-}" =~ ^[0-9]+$ ]] && last_xray_restart="$saved_xray_restart"
   [[ "${saved_dnsmasq_restart:-}" =~ ^[0-9]+$ ]] && last_dnsmasq_restart="$saved_dnsmasq_restart"
 fi
 
-probe_name="vpnproxi-health-${RANDOM}-$(date +%%s).example.com"
-probe_output=""
-probe_ok=0
-if probe_output=$(timeout 5s dig +time=3 +tries=1 "@$DNS_SERVER" -p "$DNS_PORT" "$probe_name" A +noall +comments 2>&1) \
-  && grep -Eq 'status: (NOERROR|NXDOMAIN)' <<<"$probe_output"; then
-  probe_ok=1
+if ! systemctl is-active --quiet vpnproxi-dnsmasq.service; then
+  now=$(date +%%s)
+  if ! cmp -s "$PRIMARY_UPSTREAM_FILE" "$UPSTREAM_FILE" \
+    && ! cmp -s "$CLOUDFLARE_UPSTREAM_FILE" "$UPSTREAM_FILE" \
+    && ! cmp -s "$GOOGLE_UPSTREAM_FILE" "$UPSTREAM_FILE"; then
+    install -m 0644 "$PRIMARY_UPSTREAM_FILE" "$UPSTREAM_FILE"
+    rm -f "$UPSTREAM_STATE_FILE" "$PRIMARY_DEGRADED_FILE" "$FALLBACK_UNAVAILABLE_FILE"
+  fi
+  if (( now - last_dnsmasq_restart < DNSMASQ_RESTART_COOLDOWN )); then
+    exit 0
+  fi
+  printf '0 0 0 %%s\n' "$now" > "$STATE_FILE"
+  logger -t vpnproxi-dns-health "resolver inactive; restarting dnsmasq"
+  systemctl restart vpnproxi-dnsmasq.service
+  if cmp -s "$PRIMARY_UPSTREAM_FILE" "$UPSTREAM_FILE"; then
+    printf 'primary\n' > "$UPSTREAM_MODE_FILE"
+    printf 'primary\n' > "$UPSTREAM_APPLIED_FILE"
+  elif cmp -s "$CLOUDFLARE_UPSTREAM_FILE" "$UPSTREAM_FILE"; then
+    printf 'fallback\n' > "$UPSTREAM_MODE_FILE"
+    printf 'cloudflare\n' > "$UPSTREAM_APPLIED_FILE"
+  else
+    printf 'fallback\n' > "$UPSTREAM_MODE_FILE"
+    printf 'google\n' > "$UPSTREAM_APPLIED_FILE"
+  fi
+  exit 0
 fi
 
-# A successful uncached lookup proves that the resolver is healthy. Old queue
-# saturation messages must not turn a healthy probe into a restart loop.
+# A silent strict-order upstream is not a reliable fallback mechanism in
+# dnsmasq. Keep exactly one upstream class active, switch its servers-file
+# explicitly, and use hysteresis so a transient probe cannot flush the cache
+# repeatedly. Never restart the shared Xray datapath here.
+upstream_mode=primary
+active_upstream=unknown
+active_upstream_file=""
+if cmp -s "$PRIMARY_UPSTREAM_FILE" "$UPSTREAM_FILE"; then
+  active_upstream=primary
+  active_upstream_file="$PRIMARY_UPSTREAM_FILE"
+elif cmp -s "$CLOUDFLARE_UPSTREAM_FILE" "$UPSTREAM_FILE"; then
+  active_upstream=cloudflare
+  active_upstream_file="$CLOUDFLARE_UPSTREAM_FILE"
+  upstream_mode=fallback
+elif cmp -s "$GOOGLE_UPSTREAM_FILE" "$UPSTREAM_FILE"; then
+  active_upstream=google
+  active_upstream_file="$GOOGLE_UPSTREAM_FILE"
+  upstream_mode=fallback
+fi
+if [[ -n "$active_upstream_file" ]]; then
+  activate_upstreams "$active_upstream_file" "$upstream_mode"
+fi
+primary_failures=0
+recovery_successes=0
+last_switch=0
+if [[ -r "$UPSTREAM_STATE_FILE" ]]; then
+  read -r saved_mode saved_primary_failures saved_recovery_successes saved_last_switch < "$UPSTREAM_STATE_FILE" || true
+  if [[ "${saved_mode:-}" == "$upstream_mode" \
+    && "${saved_primary_failures:-}" =~ ^[0-9]+$ \
+    && "${saved_recovery_successes:-}" =~ ^[0-9]+$ \
+    && "${saved_last_switch:-}" =~ ^[0-9]+$ ]]; then
+    primary_failures="$saved_primary_failures"
+    recovery_successes="$saved_recovery_successes"
+    last_switch="$saved_last_switch"
+  fi
+fi
+
+now=$(date +%%s)
+primary_probe_ok=0
+probe_resolver "$PRIMARY_DNS_SERVER" "$PRIMARY_DNS_PORT" primary && primary_probe_ok=1
+
+if [[ "$active_upstream" == "unknown" ]]; then
+  if (( primary_probe_ok == 1 )); then
+    activate_upstreams "$PRIMARY_UPSTREAM_FILE" primary
+    upstream_mode=primary
+    active_upstream=primary
+  elif select_healthy_fallback; then
+    activate_upstreams "$selected_fallback_file" fallback
+    upstream_mode=fallback
+    active_upstream="$selected_fallback_name"
+    last_switch="$now"
+    : > "$PRIMARY_DEGRADED_FILE"
+    logger -t vpnproxi-dns-health "repaired invalid DNS upstream file with healthy $selected_fallback_name fallback"
+  else
+    activate_upstreams "$PRIMARY_UPSTREAM_FILE" primary
+    upstream_mode=primary
+    active_upstream=primary
+    : > "$PRIMARY_DEGRADED_FILE"
+    : > "$FALLBACK_UNAVAILABLE_FILE"
+    logger -t vpnproxi-dns-health "repaired invalid DNS upstream file; no resolver currently answers"
+  fi
+  primary_failures=0
+  recovery_successes=0
+fi
+
+if [[ "$upstream_mode" == "primary" ]]; then
+  recovery_successes=0
+  if (( primary_probe_ok == 1 )); then
+    primary_failures=0
+    rm -f "$PRIMARY_DEGRADED_FILE" "$FALLBACK_UNAVAILABLE_FILE"
+  else
+    primary_failures=$((primary_failures + 1))
+    : > "$PRIMARY_DEGRADED_FILE"
+  fi
+  if (( primary_failures >= PRIMARY_FAIL_THRESHOLD )); then
+    if select_healthy_fallback; then
+      rm -f "$FALLBACK_UNAVAILABLE_FILE"
+      activate_upstreams "$selected_fallback_file" fallback
+      upstream_mode=fallback
+      active_upstream="$selected_fallback_name"
+      primary_failures=0
+      recovery_successes=0
+      last_switch="$now"
+      : > "$PRIMARY_DEGRADED_FILE"
+      logger -t vpnproxi-dns-health "encrypted DNS primary degraded; activated $selected_fallback_name DNS fallback"
+    elif [[ ! -e "$FALLBACK_UNAVAILABLE_FILE" ]]; then
+      : > "$FALLBACK_UNAVAILABLE_FILE"
+      logger -t vpnproxi-dns-health "encrypted DNS primary and direct fallbacks are unavailable"
+    fi
+  fi
+else
+  primary_failures=0
+  if (( primary_probe_ok == 1 )); then
+    recovery_successes=$((recovery_successes + 1))
+  else
+    recovery_successes=0
+  fi
+  if (( recovery_successes >= RECOVERY_SUCCESS_THRESHOLD \
+    && now >= last_switch \
+    && now - last_switch >= MIN_FALLBACK_DWELL )); then
+    activate_upstreams "$PRIMARY_UPSTREAM_FILE" primary
+    upstream_mode=primary
+    primary_failures=0
+    recovery_successes=0
+    last_switch="$now"
+    rm -f "$PRIMARY_DEGRADED_FILE" "$FALLBACK_UNAVAILABLE_FILE"
+    logger -t vpnproxi-dns-health "encrypted DNS primary recovered; deactivated direct fallback"
+  fi
+fi
+write_upstream_state
+
+# Probe the client path after any upstream transition. A successful lookup
+# proves that dnsmasq is healthy. Old queue messages must not create a loop.
+probe_ok=0
+probe_resolver "$DNS_SERVER" "$DNS_PORT" client && probe_ok=1
+
+# If one public fallback fails while the primary is still unavailable, test
+# and activate the other one before considering a service restart.
+if (( probe_ok == 0 && primary_probe_ok == 0 )) && [[ "$upstream_mode" == "fallback" ]]; then
+  alternate_file=""
+  alternate_name=""
+  if [[ "$active_upstream" == "cloudflare" ]] && probe_resolver 8.8.8.8 53 alternate-google; then
+    alternate_file="$GOOGLE_UPSTREAM_FILE"
+    alternate_name=google
+  elif [[ "$active_upstream" == "google" ]] && probe_resolver 1.1.1.1 53 alternate-cloudflare; then
+    alternate_file="$CLOUDFLARE_UPSTREAM_FILE"
+    alternate_name=cloudflare
+  fi
+  if [[ -n "$alternate_file" ]]; then
+    activate_upstreams "$alternate_file" fallback
+    active_upstream="$alternate_name"
+    last_switch=$(date +%%s)
+    recovery_successes=0
+    write_upstream_state
+    rm -f "$FALLBACK_UNAVAILABLE_FILE"
+    logger -t vpnproxi-dns-health "active DNS fallback failed; switched to $alternate_name"
+    probe_resolver "$DNS_SERVER" "$DNS_PORT" client-alternate && probe_ok=1
+  elif [[ ! -e "$FALLBACK_UNAVAILABLE_FILE" ]]; then
+    : > "$FALLBACK_UNAVAILABLE_FILE"
+    logger -t vpnproxi-dns-health "encrypted DNS primary and direct fallbacks are unavailable"
+  fi
+fi
+
+# If the active direct fallback fails while the encrypted primary is already
+# healthy, recover immediately instead of waiting for the normal dwell time.
+if (( probe_ok == 0 && primary_probe_ok == 1 )) && [[ "$upstream_mode" == "fallback" ]]; then
+  activate_upstreams "$PRIMARY_UPSTREAM_FILE" primary
+  upstream_mode=primary
+  active_upstream=primary
+  primary_failures=0
+  recovery_successes=0
+  last_switch=$(date +%%s)
+  rm -f "$PRIMARY_DEGRADED_FILE" "$FALLBACK_UNAVAILABLE_FILE"
+  write_upstream_state
+  logger -t vpnproxi-dns-health "direct DNS fallback failed; restored healthy encrypted primary"
+  probe_resolver "$DNS_SERVER" "$DNS_PORT" client-retry && probe_ok=1
+fi
+
+# Reconcile persistent UI markers from the live upstream state. This keeps a
+# previous all-resolvers-down incident from remaining visible after recovery.
 if (( probe_ok == 1 )); then
-  printf '0 0 %%s %%s\n' "$last_xray_restart" "$last_dnsmasq_restart" > "$STATE_FILE"
+  if [[ "$upstream_mode" == "primary" ]] && (( primary_probe_ok == 1 )); then
+    rm -f "$PRIMARY_DEGRADED_FILE" "$FALLBACK_UNAVAILABLE_FILE"
+  elif [[ "$upstream_mode" == "fallback" ]]; then
+    : > "$PRIMARY_DEGRADED_FILE"
+    rm -f "$FALLBACK_UNAVAILABLE_FILE"
+  fi
+fi
+if (( probe_ok == 1 )); then
+  printf '0 0 0 %%s\n' "$last_dnsmasq_restart" > "$STATE_FILE"
   exit 0
 fi
 
@@ -650,8 +1018,8 @@ overload_output=$(journalctl -t dnsmasq --since '30 seconds ago' \
 [[ -n "$overload_output" ]] && queue_saturated=1
 
 failures=$((failures + 1))
-printf '%%s %%s %%s %%s\n' "$failures" "$recovery_stage" "$last_xray_restart" "$last_dnsmasq_restart" > "$STATE_FILE"
-logger -t vpnproxi-dns-health "unhealthy count=$failures probe_ok=$probe_ok queue_saturated=$queue_saturated server=$DNS_SERVER port=$DNS_PORT"
+printf '%%s 0 0 %%s\n' "$failures" "$last_dnsmasq_restart" > "$STATE_FILE"
+logger -t vpnproxi-dns-health "client resolver unhealthy count=$failures queue_saturated=$queue_saturated server=$DNS_SERVER port=$DNS_PORT"
 if (( failures < FAILURE_THRESHOLD )); then
   exit 0
 fi
@@ -661,17 +1029,11 @@ if (( now - last_dnsmasq_restart < DNSMASQ_RESTART_COOLDOWN )); then
   logger -t vpnproxi-dns-health "resolver recovery cooling down; no restart"
   exit 0
 fi
-if (( recovery_stage > 0 && now - last_xray_restart >= XRAY_RESTART_COOLDOWN )); then
-  logger -t vpnproxi-dns-health "persistent DNS failure; restarting Xray and dnsmasq"
-  systemctl restart xray.service
-  last_xray_restart="$now"
-else
-  logger -t vpnproxi-dns-health "DNS failure threshold reached; restarting dnsmasq"
-fi
+logger -t vpnproxi-dns-health "DNS failure threshold reached; restarting dnsmasq only"
 systemctl restart vpnproxi-dnsmasq.service
 last_dnsmasq_restart="$now"
-printf '0 1 %%s %%s\n' "$last_xray_restart" "$last_dnsmasq_restart" > "$STATE_FILE"
-`, routeMode(state), gatewayIP)
+printf '0 0 0 %%s\n' "$last_dnsmasq_restart" > "$STATE_FILE"
+`, routeMode(state), gatewayIP, dnsInboundPort, dnsInboundPort)
 }
 
 func GeodataScript(state core.State) string {

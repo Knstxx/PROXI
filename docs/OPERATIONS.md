@@ -28,8 +28,8 @@ External exit host:
 - `vpnproxi-apply.service` - reapplies firewall, Xray, and StrongSwan state on boot.
 - `strongswan` - IKEv2/IPsec endpoint.
 - `xray` - transparent TCP/UDP classifier and direct/external outbound engine for Selective and Force modes.
-- `vpnproxi-dnsmasq` - project-scoped DNS cache for IPsec clients; it does not decide traffic routes. It terminates private reverse and `.local` queries locally, while internet A/AAAA queries use Xray's parallel DNS-over-HTTPS upstream.
-- `vpnproxi-dns-health.timer` - probes an uncached DNS name every 15 seconds and performs staged resolver recovery only after consecutive failed probes. Queue saturation is diagnostic and cannot override a successful probe; resolver restarts have a two-minute cooldown.
+- `vpnproxi-dnsmasq` - project-scoped DNS cache for IPsec clients; it does not decide traffic routes. It terminates private reverse and `.local` queries locally and uses Xray's parallel DNS-over-HTTPS as the normal upstream. Direct Cloudflare and Google templates are kept for outages, but only one verified resolver is active at a time.
+- `vpnproxi-dns-health.timer` - probes the client resolver path and the primary Xray DNS bridge separately every five seconds. It atomically switches dnsmasq's `servers-file` to direct fallback after two primary failures and restores the encrypted primary after six good checks plus a two-minute minimum fallback dwell. The transition uses `SIGHUP`; only repeated client-path failures restart dnsmasq, with a two-minute cooldown. It never restarts the shared Xray datapath.
 - `vpnproxi-geodata.timer` - automatic runetfreedom `geoip.dat` and `geosite.dat` refresh for Xray routing categories.
 
 ## Important Paths
@@ -39,6 +39,7 @@ External exit host:
 - `/var/log/vpnproxi/vpnproxi.log` - VPNproxi activity log, rotated by size in-app and by `logrotate`.
 - `/var/log/xray/access.log` and `/var/log/xray/error.log` - Xray logs, rotated by `/etc/logrotate.d/vpnproxi-xray`.
 - `/usr/local/etc/xray/config.json` - generated Xray config.
+- `/usr/local/bin/xray` - gateway core; clean installs pin `v26.7.28` unless `VPNPROXI_XRAY_VERSION` explicitly overrides it.
 - `/etc/swanctl/swanctl.conf` - generated StrongSwan config.
 - `/usr/local/bin/vpnproxi-updown.sh` - StrongSwan updown callback.
 - `/usr/local/bin/vpnproxi-firewall.sh` - generated firewall/sysctl reconciler.

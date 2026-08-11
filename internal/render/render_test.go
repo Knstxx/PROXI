@@ -83,7 +83,15 @@ func TestXrayConfigContainsTransparentInboundAndOutboundMark(t *testing.T) {
 		`-d 192.168.0.0/16 -j RETURN`,
 		`listen-address=$VPN_GATEWAY`,
 		`ExecStartPre=/bin/sh -c 'until /usr/sbin/ip -4 -o addr show dev lo | /usr/bin/grep -q " 10.10.10.1/32 "; do /usr/bin/sleep 1; done'`,
+		`test -s /run/vpnproxi/dns-upstreams.conf || install -m 0644 /usr/local/etc/vpnproxi/dns-upstreams-primary.conf /run/vpnproxi/dns-upstreams.conf`,
 		`TimeoutStartSec=75`,
+		`exec 8>/run/vpnproxi/dns-health.lock`,
+		`initial_upstream_mode=primary`,
+		`initial_upstream_mode=fallback`,
+		`for initial_query_type in A TXT; do`,
+		`probe_initial_resolver 127.0.0.1 5353 primary`,
+		`initial_all_unavailable=1`,
+		`: >/run/vpnproxi/dns-fallback-unavailable`,
 	} {
 		if !strings.Contains(firewall, want) {
 			t.Fatalf("selective firewall is missing %q: %s", want, firewall)
@@ -101,8 +109,27 @@ func TestXrayConfigContainsTransparentInboundAndOutboundMark(t *testing.T) {
 	if !strings.Contains(firewall, `bogus-priv`) || !strings.Contains(firewall, `local=/local/`) {
 		t.Fatalf("dnsmasq must terminate private reverse and .local lookups locally: %s", firewall)
 	}
-	if !strings.Contains(firewall, `server=127.0.0.1#5353`) {
+	if !strings.Contains(firewall, `server=127.0.0.1#5353`) || !strings.Contains(firewall, `servers-file=/run/vpnproxi/dns-upstreams.conf`) {
 		t.Fatalf("dnsmasq must use Xray's local encrypted DNS upstream: %s", firewall)
+	}
+	for _, want := range []string{
+		`dns-upstreams-fallback-cloudflare.conf`,
+		`dns-upstreams-fallback-google.conf`,
+		`server=1.1.1.1#53`,
+		`server=8.8.8.8#53`,
+	} {
+		if !strings.Contains(firewall, want) {
+			t.Fatalf("dnsmasq must install a deterministic direct fallback when the encrypted upstream stalls; missing %q: %s", want, firewall)
+		}
+	}
+	if strings.Contains(firewall, `strict-order`) || strings.Contains(firewall, `all-servers`) || strings.Contains(firewall, `fast-dns-retry`) {
+		t.Fatalf("dnsmasq must switch its servers-file explicitly instead of racing or waiting indefinitely on upstreams: %s", firewall)
+	}
+	primaryAt := strings.Index(firewall, `server=127.0.0.1#5353`)
+	cloudflareFallbackAt := strings.Index(firewall, `server=1.1.1.1#53`)
+	googleFallbackAt := strings.Index(firewall, `server=8.8.8.8#53`)
+	if primaryAt < 0 || cloudflareFallbackAt < primaryAt || googleFallbackAt < cloudflareFallbackAt {
+		t.Fatalf("encrypted DNS must remain first, followed by direct fallbacks: %s", firewall)
 	}
 	if !strings.Contains(firewall, `address=/eokai.com/#`) {
 		t.Fatalf("dnsmasq must answer the known broken delegation locally: %s", firewall)
@@ -276,18 +303,266 @@ func TestDNSHealthScriptUsesConsecutiveFailuresAndRecoveryCooldown(t *testing.T)
 	for _, want := range []string{
 		`FAILURE_THRESHOLD=2`,
 		`DNSMASQ_RESTART_COOLDOWN=120`,
-		`XRAY_RESTART_COOLDOWN=300`,
-		`vpnproxi-health-${RANDOM}-$(date +%s).example.com`,
+		`DNS_SERVER="${VPNPROXI_DNS_HEALTH_SERVER:-10.10.10.1}"`,
+		`DNS_PORT="${VPNPROXI_DNS_HEALTH_PORT:-53}"`,
+		`PRIMARY_DNS_SERVER="${VPNPROXI_DNS_PRIMARY_SERVER:-127.0.0.1}"`,
+		`PRIMARY_DNS_PORT="${VPNPROXI_DNS_PRIMARY_PORT:-5353}"`,
+		`probe_name="vpnproxi-${label}-${query_type}-${RANDOM}-$(date +%s).example.com"`,
+		`PRIMARY_FAIL_THRESHOLD="${VPNPROXI_DNS_PRIMARY_FAIL_THRESHOLD:-2}"`,
+		`RECOVERY_SUCCESS_THRESHOLD="${VPNPROXI_DNS_RECOVERY_SUCCESS_THRESHOLD:-6}"`,
+		`MIN_FALLBACK_DWELL="${VPNPROXI_DNS_MIN_FALLBACK_DWELL:-120}"`,
 		`status: (NOERROR|NXDOMAIN)`,
 		`if (( probe_ok == 1 )); then`,
+		`UPSTREAM_FILE="$STATE_DIR/dns-upstreams.conf"`,
+		`UPSTREAM_APPLIED_FILE="$STATE_DIR/dns-upstream-applied"`,
+		`activate_upstreams "$selected_fallback_file" fallback`,
+		`recovery_successes >= RECOVERY_SUCCESS_THRESHOLD`,
+		`systemctl kill --kill-who=main --signal=HUP vpnproxi-dnsmasq.service`,
+		`encrypted DNS primary degraded; activated $selected_fallback_name DNS fallback`,
+		`DNS failover thresholds and dwell must be greater than zero`,
+		`repair_upstream_templates`,
+		`repaired DNS upstream template`,
 		`resolver recovery cooling down; no restart`,
 		`Maximum number of concurrent DNS queries reached`,
 		`queue_saturated`,
 		`systemctl restart vpnproxi-dnsmasq.service`,
-		`systemctl restart xray.service`,
 	} {
 		if !strings.Contains(script, want) {
 			t.Fatalf("DNS health script is missing %q: %s", want, script)
+		}
+	}
+	if strings.Contains(script, `systemctl restart xray.service`) {
+		t.Fatalf("DNS recovery must not restart the shared Xray datapath: %s", script)
+	}
+}
+
+func TestDNSHealthScriptFailoverStateMachine(t *testing.T) {
+	state := core.DefaultState()
+	state.Routes.Mode = "selective"
+
+	root := t.TempDir()
+	stateDir := filepath.Join(root, "run")
+	etcDir := filepath.Join(root, "etc")
+	binDir := filepath.Join(root, "bin")
+	for _, dir := range []string{stateDir, etcDir, binDir} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write := func(path, content string, mode os.FileMode) {
+		t.Helper()
+		if err := os.WriteFile(path, []byte(content), mode); err != nil {
+			t.Fatal(err)
+		}
+	}
+	read := func(path string) string {
+		t.Helper()
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return strings.TrimSpace(string(raw))
+	}
+
+	primary := filepath.Join(etcDir, "dns-upstreams-primary.conf")
+	cloudflare := filepath.Join(etcDir, "dns-upstreams-fallback-cloudflare.conf")
+	google := filepath.Join(etcDir, "dns-upstreams-fallback-google.conf")
+	active := filepath.Join(stateDir, "dns-upstreams.conf")
+	modeFile := filepath.Join(stateDir, "dns-upstream-mode")
+	appliedFile := filepath.Join(stateDir, "dns-upstream-applied")
+	upstreamState := filepath.Join(stateDir, "dns-upstream.state")
+	write(primary, "server=127.0.0.1#5353\n", 0o644)
+	write(cloudflare, "server=1.1.1.1#53\n", 0o644)
+	write(google, "server=8.8.8.8#53\n", 0o644)
+	write(active, read(primary)+"\n", 0o644)
+	write(modeFile, "primary\n", 0o644)
+	write(appliedFile, "primary\n", 0o644)
+	write(upstreamState, "primary 0 0 0\n", 0o644)
+
+	systemctlLog := filepath.Join(root, "systemctl.log")
+	digLog := filepath.Join(root, "dig.log")
+	hupFailFile := filepath.Join(root, "fail-hup")
+	write(filepath.Join(binDir, "systemctl"), `#!/bin/bash
+set -euo pipefail
+case "${1:-}" in
+  is-active) exit 0 ;;
+  kill)
+    if [[ -e "$FAKE_HUP_FAIL_FILE" ]]; then
+      echo HUP_FAIL >> "$FAKE_SYSTEMCTL_LOG"
+      exit 1
+    fi
+    echo HUP >> "$FAKE_SYSTEMCTL_LOG"
+    exit 0
+    ;;
+  restart)
+    echo "RESTART ${*:2}" >> "$FAKE_SYSTEMCTL_LOG"
+    exit 0
+    ;;
+  *) exit 0 ;;
+esac
+`, 0o755)
+	write(filepath.Join(binDir, "dig"), `#!/bin/bash
+set -euo pipefail
+server=""
+for arg in "$@"; do
+  [[ "$arg" == @* ]] && server="${arg#@}"
+done
+case "$server" in
+  127.0.0.1) status="${FAKE_PRIMARY:-up}" ;;
+  1.1.1.1) status="${FAKE_CLOUDFLARE:-up}" ;;
+  8.8.8.8) status="${FAKE_GOOGLE:-up}" ;;
+  10.10.10.1) status="${FAKE_CLIENT:-up}" ;;
+  *) status=down ;;
+esac
+echo "$server $status" >> "$FAKE_DIG_LOG"
+[[ "$status" == up ]] || exit 9
+echo ';; ->>HEADER<<- opcode: QUERY, status: NXDOMAIN, id: 1'
+`, 0o755)
+	write(filepath.Join(binDir, "logger"), "#!/bin/bash\nexit 0\n", 0o755)
+	write(filepath.Join(binDir, "journalctl"), "#!/bin/bash\nexit 0\n", 0o755)
+	write(filepath.Join(binDir, "flock"), "#!/bin/bash\nexit 0\n", 0o755)
+	write(filepath.Join(binDir, "timeout"), "#!/bin/bash\nshift\nexec \"$@\"\n", 0o755)
+
+	script := DNSHealthScript(state)
+	script = strings.ReplaceAll(script, "/run/vpnproxi", stateDir)
+	script = strings.ReplaceAll(script, "/usr/local/etc/vpnproxi", etcDir)
+	scriptPath := filepath.Join(root, "dns-health.sh")
+	write(scriptPath, script, 0o755)
+
+	run := func(expectSuccess bool, overrides ...string) string {
+		t.Helper()
+		cmd := exec.Command("bash", scriptPath)
+		values := map[string]string{
+			"PATH":                     binDir + ":" + os.Getenv("PATH"),
+			"FAKE_SYSTEMCTL_LOG":       systemctlLog,
+			"FAKE_HUP_FAIL_FILE":       hupFailFile,
+			"FAKE_DIG_LOG":             digLog,
+			"FAKE_PRIMARY":             "up",
+			"FAKE_CLOUDFLARE":          "up",
+			"FAKE_GOOGLE":              "up",
+			"FAKE_CLIENT":              "up",
+			"VPNPROXI_DNS_HEALTH_PORT": "53",
+		}
+		for _, override := range overrides {
+			parts := strings.SplitN(override, "=", 2)
+			values[parts[0]] = parts[1]
+		}
+		cmd.Env = nil
+		for _, item := range os.Environ() {
+			parts := strings.SplitN(item, "=", 2)
+			if _, overridden := values[parts[0]]; !overridden {
+				cmd.Env = append(cmd.Env, item)
+			}
+		}
+		for key, value := range values {
+			cmd.Env = append(cmd.Env, key+"="+value)
+		}
+		out, err := cmd.CombinedOutput()
+		if expectSuccess && err != nil {
+			t.Fatalf("health script failed: %v\n%s", err, out)
+		}
+		if !expectSuccess && err == nil {
+			t.Fatalf("health script unexpectedly succeeded:\n%s", out)
+		}
+		return string(out)
+	}
+	hupCount := func() int {
+		raw, err := os.ReadFile(systemctlLog)
+		if os.IsNotExist(err) {
+			return 0
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		count := 0
+		for _, line := range strings.Split(strings.TrimSpace(string(raw)), "\n") {
+			if line == "HUP" {
+				count++
+			}
+		}
+		return count
+	}
+
+	// Two consecutive primary failures activate one verified fallback.
+	run(true, "FAKE_PRIMARY=down")
+	if got := read(upstreamState); !strings.HasPrefix(got, "primary 1 0 ") {
+		t.Fatalf("first failure state = %q; dig log=%q", got, read(digLog))
+	}
+	if got := hupCount(); got != 0 {
+		t.Fatalf("HUP count after one failure = %d", got)
+	}
+	run(true, "FAKE_PRIMARY=down")
+	if got := read(active); got != read(cloudflare) || read(modeFile) != "fallback" || read(appliedFile) != "cloudflare" {
+		t.Fatalf("fallback not applied: active=%q mode=%q applied=%q", got, read(modeFile), read(appliedFile))
+	}
+	if got := hupCount(); got != 1 {
+		t.Fatalf("HUP count after failover = %d", got)
+	}
+
+	// Recovery uses consecutive successes and switches back only once.
+	write(upstreamState, "fallback 0 0 0\n", 0o644)
+	run(true, "VPNPROXI_DNS_RECOVERY_SUCCESS_THRESHOLD=2", "VPNPROXI_DNS_MIN_FALLBACK_DWELL=1")
+	if read(modeFile) != "fallback" {
+		t.Fatalf("recovered before success threshold")
+	}
+	run(true, "VPNPROXI_DNS_RECOVERY_SUCCESS_THRESHOLD=2", "VPNPROXI_DNS_MIN_FALLBACK_DWELL=1")
+	if got := read(active); got != read(primary) || read(modeFile) != "primary" || read(appliedFile) != "primary" {
+		t.Fatalf("primary not restored: active=%q mode=%q applied=%q", got, read(modeFile), read(appliedFile))
+	}
+
+	// If rename succeeded but HUP failed, the marker mismatch forces a retry.
+	write(active, read(cloudflare)+"\n", 0o644)
+	write(modeFile, "fallback\n", 0o644)
+	write(appliedFile, "primary\n", 0o644)
+	write(upstreamState, "fallback 0 0 0\n", 0o644)
+	write(hupFailFile, "fail\n", 0o600)
+	run(false, "FAKE_PRIMARY=down")
+	if read(appliedFile) != "primary" {
+		t.Fatalf("failed HUP advanced applied marker")
+	}
+	if err := os.Remove(hupFailFile); err != nil {
+		t.Fatal(err)
+	}
+	run(true, "FAKE_PRIMARY=down")
+	if read(appliedFile) != "cloudflare" {
+		t.Fatalf("HUP retry did not advance marker")
+	}
+
+	// A non-empty corrupt active file is repaired from a validated template.
+	write(active, "not-a-dnsmasq-server\n", 0o644)
+	write(appliedFile, "cloudflare\n", 0o644)
+	run(true)
+	if got := read(active); got != read(primary) || read(appliedFile) != "primary" {
+		t.Fatalf("corrupt active file not repaired: active=%q applied=%q", got, read(appliedFile))
+	}
+
+	// Zero thresholds are rejected and no unverified fallback is activated.
+	run(false, "VPNPROXI_DNS_PRIMARY_FAIL_THRESHOLD=0")
+	write(active, read(primary)+"\n", 0o644)
+	write(modeFile, "primary\n", 0o644)
+	write(appliedFile, "primary\n", 0o644)
+	write(upstreamState, "primary 0 0 0\n", 0o644)
+	run(true,
+		"FAKE_PRIMARY=down",
+		"FAKE_CLOUDFLARE=down",
+		"FAKE_GOOGLE=down",
+		"VPNPROXI_DNS_PRIMARY_FAIL_THRESHOLD=1",
+	)
+	if read(modeFile) != "primary" {
+		t.Fatalf("activated an unverified fallback")
+	}
+	if _, err := os.Stat(filepath.Join(stateDir, "dns-fallback-unavailable")); err != nil {
+		t.Fatalf("missing all-upstreams-down marker: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(stateDir, "dns-primary-degraded")); err != nil {
+		t.Fatalf("missing primary-degraded marker: %v", err)
+	}
+
+	// A healthy primary clears stale incident markers without a service restart.
+	run(true)
+	for _, marker := range []string{"dns-primary-degraded", "dns-fallback-unavailable"} {
+		if _, err := os.Stat(filepath.Join(stateDir, marker)); !os.IsNotExist(err) {
+			t.Fatalf("stale marker %s was not cleared: %v", marker, err)
 		}
 	}
 }

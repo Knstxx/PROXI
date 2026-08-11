@@ -93,7 +93,7 @@ In `Selective Xray`, traffic goes through the external outbound when it matches 
 - Always proxy ports
 - Runet blocked list rules
 
-Direct rules override proxy rules. DNS to the gateway and private home/service subnets bypass transparent traffic classification. The local dnsmasq cache forwards A/AAAA lookups to Xray, which uses parallel DNS-over-HTTPS through the configured external outbound; this does not change how the resulting site connection is routed.
+Direct rules override proxy rules. DNS to the gateway and private home/service subnets bypass transparent traffic classification. The local dnsmasq cache uses Xray's parallel DNS-over-HTTPS through the configured external outbound as its primary upstream; this does not change how the resulting site connection is routed. Direct Cloudflare and Google templates are kept for outages; the health check activates one verified resolver at a time only while the encrypted bridge is unavailable.
 
 ## Runet blocked list source
 
@@ -108,7 +108,7 @@ Data files are updated by the generated systemd timer `vpnproxi-geodata.timer`. 
 
 The files are installed into `/usr/local/share/xray`. Xray restarts after a successful refresh to load the new categories. `vpnproxi-dnsmasq` remains only a small DNS cache and does not decide routes. Private reverse and `.local` lookups terminate locally instead of occupying the upstream queue. In Selective and Force modes, A/AAAA upstream lookups use parallel DNS-over-HTTPS through Xray instead of depending on raw UDP/TCP port 53; the cache's pending-query and TCP-connection limits are also bounded.
 
-The resolver can serve recently expired cached answers during a brief upstream failure. `vpnproxi-dns-health.timer` checks an uncached name every 15 seconds. A successful probe is always considered healthy even if older queue-saturation messages exist. Two consecutive failed probes restart dnsmasq, resolver restarts have a two-minute cooldown, and persistent failures can restart Xray no more than once every five minutes.
+The resolver can serve recently expired cached answers during a brief upstream failure. `vpnproxi-dns-health.timer` probes the client dnsmasq path and the primary Xray DNS bridge separately every five seconds. Two consecutive primary failures atomically switch dnsmasq to the direct fallback `servers-file` with `SIGHUP`; recovery requires six good checks and a two-minute minimum fallback dwell. Two consecutive client-path failures restart only dnsmasq with a two-minute cooldown. DNS monitoring never restarts the shared Xray datapath and therefore cannot tear down active proxied calls.
 
 ## Traffic statistics
 

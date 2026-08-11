@@ -35,6 +35,27 @@ func Apply(state core.State) (Result, error) {
 	if err != nil {
 		return Result{}, err
 	}
+	dnsHealthTimerWasActive := exec.Command("systemctl", "is-active", "--quiet", "vpnproxi-dns-health.timer").Run() == nil
+	restoreDNSHealthTimer := dnsHealthTimerWasActive
+	if dnsHealthTimerWasActive {
+		if err := runRequired(&res, "systemctl", "stop", "vpnproxi-dns-health.timer"); err != nil {
+			return Result{}, err
+		}
+		defer func() {
+			if restoreDNSHealthTimer {
+				if out, err := exec.Command("systemctl", "start", "vpnproxi-dns-health.timer").CombinedOutput(); err != nil {
+					fmt.Fprintf(os.Stderr, "restore vpnproxi-dns-health.timer: %v: %s\n", err, strings.TrimSpace(string(out)))
+				}
+			}
+		}()
+	}
+	dnsHealthServiceState, _ := exec.Command("systemctl", "show", "vpnproxi-dns-health.service", "-p", "ActiveState", "--value").Output()
+	switch strings.TrimSpace(string(dnsHealthServiceState)) {
+	case "active", "activating", "reloading", "deactivating":
+		if err := runRequired(&res, "systemctl", "stop", "vpnproxi-dns-health.service"); err != nil {
+			return Result{}, err
+		}
+	}
 	res.ChangedFiles = append(res.ChangedFiles, certFiles...)
 	writes := []struct {
 		path string
@@ -83,9 +104,6 @@ func Apply(state core.State) (Result, error) {
 	if err := runRequired(&res, "systemctl", "enable", "--now", "vpnproxi-geodata.timer"); err != nil {
 		return res, err
 	}
-	if err := runRequired(&res, "systemctl", "enable", "--now", "vpnproxi-dns-health.timer"); err != nil {
-		return res, err
-	}
 	if err := runRequired(&res, "systemctl", "enable", "--now", "vpnproxi-certificate-refresh.timer"); err != nil {
 		return res, err
 	}
@@ -112,6 +130,10 @@ func Apply(state core.State) (Result, error) {
 	if err := runRequired(&res, "systemctl", "restart", "strongswan"); err != nil {
 		return res, err
 	}
+	if err := runRequired(&res, "systemctl", "enable", "--now", "vpnproxi-dns-health.timer"); err != nil {
+		return res, err
+	}
+	restoreDNSHealthTimer = false
 	return res, nil
 }
 
@@ -154,11 +176,33 @@ func Status() map[string]any {
 		"dnsmasq":         commandText("systemctl", "is-active", "vpnproxi-dnsmasq"),
 		"dnsHealthTimer":  commandText("systemctl", "is-active", "vpnproxi-dns-health.timer"),
 		"dnsHealthLast":   commandText("systemctl", "show", "vpnproxi-dns-health.service", "-p", "Result", "-p", "ExecMainStatus"),
-		"xrayStats":       commandText("xray", "api", "statsquery", "--server=127.0.0.1:10085", "-pattern", ""),
-		"redirectRules":   commandText("iptables", "-t", "nat", "-S", "VPNPROXI_REDIRECT"),
-		"natRules":        commandText("iptables", "-t", "nat", "-S", "POSTROUTING"),
-		"netDev":          commandText("cat", "/proc/net/dev"),
+		"dnsUpstreamMode": statusFileText("/run/vpnproxi/dns-upstream-mode"),
+		"dnsUpstream":     statusFileText("/run/vpnproxi/dns-upstream-applied"),
+		"dnsPrimaryDegraded": func() bool {
+			_, err := os.Stat("/run/vpnproxi/dns-primary-degraded")
+			return err == nil
+		}(),
+		"dnsFallbackUnavailable": func() bool {
+			_, err := os.Stat("/run/vpnproxi/dns-fallback-unavailable")
+			return err == nil
+		}(),
+		"xrayStats":     commandText("xray", "api", "statsquery", "--server=127.0.0.1:10085", "-pattern", ""),
+		"redirectRules": commandText("iptables", "-t", "nat", "-S", "VPNPROXI_REDIRECT"),
+		"natRules":      commandText("iptables", "-t", "nat", "-S", "POSTROUTING"),
+		"netDev":        commandText("cat", "/proc/net/dev"),
 	}
+}
+
+func statusFileText(path string) string {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return "unknown"
+	}
+	text := strings.TrimSpace(string(raw))
+	if text == "" {
+		return "unknown"
+	}
+	return text
 }
 
 func TrafficSnapshot() map[string]string {
@@ -516,12 +560,12 @@ WantedBy=timers.target
 func dnsHealthServiceUnit() string {
 	return `[Unit]
 Description=VPNproxi DNS health check and recovery
-After=xray.service vpnproxi-dnsmasq.service
+After=xray.service vpnproxi-dnsmasq.service vpnproxi-apply.service
 
 [Service]
 Type=oneshot
 ExecStart=/usr/local/bin/vpnproxi-dns-health.sh
-TimeoutStartSec=12s
+TimeoutStartSec=60s
 `
 }
 
@@ -530,10 +574,10 @@ func dnsHealthTimerUnit() string {
 Description=Check VPNproxi DNS health
 
 [Timer]
-OnBootSec=45s
-OnUnitActiveSec=15s
+OnBootSec=15s
+OnUnitActiveSec=5s
 AccuracySec=1s
-RandomizedDelaySec=3s
+RandomizedDelaySec=1s
 Unit=vpnproxi-dns-health.service
 
 [Install]

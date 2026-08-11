@@ -788,6 +788,11 @@ function renderStatus(data) {
   }
 
   const traffic = parseNetDev(data.netDev || '');
+  const dnsState = data.dnsFallbackUnavailable
+    ? t('unavailable')
+    : data.dnsPrimaryDegraded
+      ? t('degraded')
+      : t('healthy');
   const rows = [
     `${t('platform')}: ${data.platform || '-'}`,
     `${t('applyEnabled')}: ${data.applyEnabled ? t('enabled') : t('disabled')}`,
@@ -795,6 +800,7 @@ function renderStatus(data) {
     `${t('strongswan')}: ${statusValue(data.strongswan)}`,
     `dnsmasq: ${statusValue(data.dnsmasq)}`,
     `${t('dnsHealth')}: ${statusValue(data.dnsHealthTimer)}`,
+    `${t('dnsUpstream')}: ${statusValue(data.dnsUpstreamMode)} / ${statusValue(data.dnsUpstream)} (${dnsState})`,
     `${t('routingMode')}: ${routingModeLabel(data.routingMode || serverState?.routes?.mode || 'direct')}`,
     `${t('geodataUpdated')}: ${formatGeodataUpdated(data)}`,
     '',

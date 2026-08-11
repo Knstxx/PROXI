@@ -8,6 +8,7 @@ VERSION_BIN="/usr/local/bin/vpnproxi"
 ENV_FILE="/etc/vpnproxi/vpnproxi.env"
 AUTH_FILE="/etc/vpnproxi/admin.json"
 TRAFFIC_FILE="/var/lib/vpnproxi/traffic.json"
+XRAY_VERSION="${VPNPROXI_XRAY_VERSION:-v26.7.28}"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -33,8 +34,12 @@ net.ipv4.ip_forward=1
 EOF
 sysctl --system >/dev/null
 
-if ! command -v xray >/dev/null 2>&1; then
-  bash -c "$(curl -fsSL https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install
+current_xray_version=""
+if command -v xray >/dev/null 2>&1; then
+  current_xray_version="v$(xray -version 2>/dev/null | awk 'NR == 1 { sub(/^v/, "", $2); print $2 }' || true)"
+fi
+if [[ "$current_xray_version" != "$XRAY_VERSION" ]]; then
+  bash -c "$(curl -fsSL https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install --version "$XRAY_VERSION"
 fi
 
 if ! getent group vpnproxi-xray >/dev/null; then

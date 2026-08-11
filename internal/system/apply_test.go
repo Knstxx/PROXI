@@ -152,6 +152,21 @@ func TestCertificateRefreshUnitsUseDedicatedCommand(t *testing.T) {
 	}
 }
 
+func TestDNSHealthUnitsUseFastNonOverlappingChecks(t *testing.T) {
+	t.Parallel()
+
+	service := dnsHealthServiceUnit()
+	if !strings.Contains(service, "After=xray.service vpnproxi-dnsmasq.service vpnproxi-apply.service") || !strings.Contains(service, "TimeoutStartSec=60s") {
+		t.Fatalf("DNS health service = %q", service)
+	}
+	timer := dnsHealthTimerUnit()
+	for _, want := range []string{"OnBootSec=15s", "OnUnitActiveSec=5s", "RandomizedDelaySec=1s"} {
+		if !strings.Contains(timer, want) {
+			t.Fatalf("DNS health timer missing %q: %q", want, timer)
+		}
+	}
+}
+
 func TestRoutingServiceFollowsNetworkRestarts(t *testing.T) {
 	t.Parallel()
 

@@ -73,6 +73,8 @@ The installer asks for an administrator username and password and writes the pas
 /etc/vpnproxi/admin.json
 ```
 
+The gateway Xray core is pinned to `v26.7.28` for reproducible installs. Set `VPNPROXI_XRAY_VERSION` explicitly only when testing a deliberate core upgrade or rollback.
+
 The generated CA certificate for client trust is:
 
 ```text
@@ -157,9 +159,9 @@ Proxy matches can come from:
 - `Always proxy ports`
 - Runet blocked-list rules
 
-Direct rules override proxy rules. DNS to the gateway and private home/service subnets bypass transparent traffic classification. The local dnsmasq cache answers private reverse and `.local` lookups locally instead of leaking or queueing them upstream. It forwards internet A/AAAA lookups to Xray, which uses parallel DNS-over-HTTPS through the configured external outbound; this does not change how the resulting site connection is routed.
+Direct rules override proxy rules. DNS to the gateway and private home/service subnets bypass transparent traffic classification. The local dnsmasq cache answers private reverse and `.local` lookups locally instead of leaking or queueing them upstream. Its primary internet resolver is Xray's parallel DNS-over-HTTPS through the configured external outbound; this does not change how the resulting site connection is routed. When that encrypted bridge stops answering, the health check atomically selects one verified direct resolver (Cloudflare first, Google as the alternate). It switches back after the bridge recovers, so the fallbacks are not raced during normal operation.
 
-The resolver serves recently expired cache entries during short upstream failures. `vpnproxi-dns-health.timer` probes an uncached name every 15 seconds. A successful probe always wins over old queue-saturation messages; after two consecutive failed probes it restarts dnsmasq, with a two-minute resolver cooldown, and persistent failures may restart Xray no more than once every five minutes.
+The resolver serves recently expired cache entries during short upstream failures. `vpnproxi-dns-health.timer` probes both the client resolver path and the primary Xray DNS bridge every five seconds. Two consecutive primary failures reload only dnsmasq's small `servers-file` with `SIGHUP`; recovery requires six successful checks and at least two minutes on fallback before restoring the encrypted primary. After two consecutive client-path failures it restarts only dnsmasq, with a two-minute cooldown. DNS recovery never restarts the shared Xray datapath and therefore cannot tear down active proxied calls.
 
 ### Force Xray
 
