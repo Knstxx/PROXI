@@ -40,8 +40,8 @@ func Apply(state core.State) (Result, error) {
 		data []byte
 		mode os.FileMode
 	}{
-		{state.Server.XrayConfigPath, bundle.XrayConfig, 0o644},
-		{state.Server.SwanctlPath, bundle.SwanctlConf, 0o644},
+		{state.Server.XrayConfigPath, bundle.XrayConfig, 0o600},
+		{state.Server.SwanctlPath, bundle.SwanctlConf, 0o600},
 		{state.Server.UpdownPath, bundle.UpdownScript, 0o755},
 		{state.Server.UsersCSVPath, bundle.UsersCSV, 0o600},
 		{"/usr/local/bin/vpnproxi-geodata-update.sh", bundle.GeodataScript, 0o755},

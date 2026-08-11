@@ -11,6 +11,7 @@ VPNproxi controls host networking, StrongSwan and Xray. Treat the web UI as a pr
 - Restrict access to the UI with firewall rules or a private admin network when possible.
 - Do not paste share links into public logs or issue trackers. Share links contain credentials.
 - Keep `/etc/vpnproxi/admin.json`, `/etc/vpnproxi/vpnproxi.env`, `/etc/vpnproxi/state.json`, and `/etc/swanctl/private/*` readable only by root.
+- Generated Xray and StrongSwan configurations contain endpoint and client credentials and are written with mode `0600`.
 - Browser responses set `Content-Security-Policy`, `X-Frame-Options`, `X-Content-Type-Options` and `Referrer-Policy` by default. Keep reverse proxies from stripping them.
 - Review generated config preview before `Apply to host` on production.
 
