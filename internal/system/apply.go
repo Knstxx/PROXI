@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"os/user"
 	"path/filepath"
 	"runtime"
 	"strconv"
@@ -62,6 +63,11 @@ func Apply(state core.State) (Result, error) {
 	for _, w := range writes {
 		if err := atomicWrite(w.path, w.data, w.mode); err != nil {
 			return res, err
+		}
+		if filepath.Clean(w.path) == filepath.Clean(state.Server.XrayConfigPath) {
+			if err := secureXrayConfigForService(w.path); err != nil {
+				return res, err
+			}
 		}
 		res.ChangedFiles = append(res.ChangedFiles, w.path)
 	}
@@ -249,6 +255,24 @@ func atomicWrite(path string, data []byte, mode os.FileMode) error {
 		return err
 	}
 	return os.Rename(tmp, path)
+}
+
+func secureXrayConfigForService(path string) error {
+	group, err := user.LookupGroup("vpnproxi-xray")
+	if err != nil {
+		return fmt.Errorf("lookup Xray service group vpnproxi-xray: %w", err)
+	}
+	gid, err := strconv.Atoi(group.Gid)
+	if err != nil {
+		return fmt.Errorf("parse Xray service group gid %q: %w", group.Gid, err)
+	}
+	if err := os.Chown(path, 0, gid); err != nil {
+		return fmt.Errorf("set Xray config group on %s: %w", path, err)
+	}
+	if err := os.Chmod(path, 0o640); err != nil {
+		return fmt.Errorf("set Xray config permissions on %s: %w", path, err)
+	}
+	return nil
 }
 
 func prepareSwanctlCertificate(state core.State) (core.State, []string, error) {

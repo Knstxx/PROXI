@@ -82,6 +82,8 @@ func TestXrayConfigContainsTransparentInboundAndOutboundMark(t *testing.T) {
 		`-d 10.0.0.0/8 -j RETURN`,
 		`-d 192.168.0.0/16 -j RETURN`,
 		`listen-address=$VPN_GATEWAY`,
+		`ExecStartPre=/bin/sh -c 'until /usr/sbin/ip -4 -o addr show dev lo | /usr/bin/grep -q " 10.10.10.1/32 "; do /usr/bin/sleep 1; done'`,
+		`TimeoutStartSec=75`,
 	} {
 		if !strings.Contains(firewall, want) {
 			t.Fatalf("selective firewall is missing %q: %s", want, firewall)

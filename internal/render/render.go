@@ -467,9 +467,11 @@ Wants=network-online.target
 
 [Service]
 Type=simple
+ExecStartPre=/bin/sh -c 'until /usr/sbin/ip -4 -o addr show dev lo | /usr/bin/grep -q " %s/32 "; do /usr/bin/sleep 1; done'
 ExecStart=/usr/sbin/dnsmasq --keep-in-foreground --conf-file=/usr/local/etc/vpnproxi/dnsmasq.conf --pid-file=/run/vpnproxi-dnsmasq.pid
 Restart=on-failure
 RestartSec=2
+TimeoutStartSec=75
 
 [Install]
 WantedBy=multi-user.target
@@ -563,7 +565,7 @@ iptables -I FORWARD 1 -s "$VPN_SUBNET" -o "$WAN_IFACE" -j ACCEPT
 iptables -I FORWARD 2 -d "$VPN_SUBNET" -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
 iptables -t mangle -I FORWARD 1 -s "$VPN_SUBNET" -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
 iptables -t mangle -I FORWARD 2 -d "$VPN_SUBNET" -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
-`, routeMode(state), state.Server.VPNSubnet, gatewayIP, fmt.Sprintf("%d", state.Server.TProxyPort), state.Server.TProxyMark, state.Server.TProxyTable, proxySetName, directSetName, dnsInboundPort)
+`, routeMode(state), state.Server.VPNSubnet, gatewayIP, fmt.Sprintf("%d", state.Server.TProxyPort), state.Server.TProxyMark, state.Server.TProxyTable, proxySetName, directSetName, dnsInboundPort, gatewayIP)
 }
 
 func RoutingScript(state core.State) string {

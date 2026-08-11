@@ -37,6 +37,29 @@ if ! command -v xray >/dev/null 2>&1; then
   bash -c "$(curl -fsSL https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install
 fi
 
+if ! getent group vpnproxi-xray >/dev/null; then
+  groupadd --system vpnproxi-xray
+fi
+if ! id -u vpnproxi-xray >/dev/null 2>&1; then
+  useradd --system --gid vpnproxi-xray --home-dir /nonexistent --shell /usr/sbin/nologin vpnproxi-xray
+fi
+install -d -m 0750 -o vpnproxi-xray -g vpnproxi-xray /var/log/xray
+install -d -m 0755 /etc/systemd/system/xray.service.d
+cat > /etc/systemd/system/xray.service.d/20-vpnproxi-security.conf <<'EOF'
+[Service]
+User=vpnproxi-xray
+Group=vpnproxi-xray
+UMask=0027
+ProtectHome=true
+PrivateTmp=true
+ProtectControlGroups=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+RestrictSUIDSGID=true
+LockPersonality=true
+SystemCallArchitectures=native
+EOF
+
 install -d -m 0750 /etc/vpnproxi
 install -d -m 0750 /var/lib/vpnproxi
 install -d -m 0755 /usr/local/etc/vpnproxi
