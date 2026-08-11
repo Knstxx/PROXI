@@ -108,7 +108,7 @@ Data files are updated by the generated systemd timer `vpnproxi-geodata.timer`. 
 
 The files are installed into `/usr/local/share/xray`. Xray restarts after a successful refresh to load the new categories. `vpnproxi-dnsmasq` remains only a small DNS cache and does not decide routes. Private reverse and `.local` lookups terminate locally instead of occupying the upstream queue. In Selective and Force modes, A/AAAA upstream lookups use parallel DNS-over-HTTPS through Xray instead of depending on raw UDP/TCP port 53; the cache's pending-query and TCP-connection limits are also bounded.
 
-The resolver can serve recently expired cached answers during a brief upstream failure. `vpnproxi-dns-health.timer` checks an uncached name every 15 seconds and watches dnsmasq queue-saturation events. Two consecutive unhealthy windows restart dnsmasq; if failures persist, Xray can be restarted no more than once every five minutes.
+The resolver can serve recently expired cached answers during a brief upstream failure. `vpnproxi-dns-health.timer` checks an uncached name every 15 seconds. A successful probe is always considered healthy even if older queue-saturation messages exist. Two consecutive failed probes restart dnsmasq, resolver restarts have a two-minute cooldown, and persistent failures can restart Xray no more than once every five minutes.
 
 ## Traffic statistics
 

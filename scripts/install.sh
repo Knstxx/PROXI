@@ -202,6 +202,26 @@ fi
 ufw --force enable
 systemctl enable --now fail2ban
 
+if [[ ! -e /var/log/vpnproxi/vpnproxi.log ]]; then
+  install -m 0640 -o root -g root /dev/null /var/log/vpnproxi/vpnproxi.log
+fi
+cat > /etc/fail2ban/filter.d/vpnproxi-auth.conf <<'EOF'
+[Definition]
+failregex = ^\S+ kind=auth\.login\.failed .*remote="<HOST>".*$
+ignoreregex =
+EOF
+cat > /etc/fail2ban/jail.d/vpnproxi-auth.local <<'EOF'
+[vpnproxi-auth]
+enabled = true
+filter = vpnproxi-auth
+logpath = /var/log/vpnproxi/vpnproxi.log
+port = http,https
+maxretry = 5
+findtime = 600
+bantime = 3600
+EOF
+systemctl restart fail2ban
+
 cat > /etc/systemd/system/vpnproxi.service <<EOF
 [Unit]
 Description=VPNproxi control panel
@@ -214,6 +234,10 @@ EnvironmentFile=$ENV_FILE
 ExecStart=$VERSION_BIN --addr $LISTEN_ADDR
 Restart=on-failure
 RestartSec=3
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+LimitNOFILE=65536
 
 [Install]
 WantedBy=multi-user.target
@@ -229,6 +253,9 @@ Wants=network-online.target
 Type=oneshot
 EnvironmentFile=/etc/vpnproxi/vpnproxi.env
 ExecStart=/usr/local/bin/vpnproxi --apply-once
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
 
 [Install]
 WantedBy=multi-user.target

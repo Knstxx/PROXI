@@ -159,7 +159,7 @@ Proxy matches can come from:
 
 Direct rules override proxy rules. DNS to the gateway and private home/service subnets bypass transparent traffic classification. The local dnsmasq cache answers private reverse and `.local` lookups locally instead of leaking or queueing them upstream. It forwards internet A/AAAA lookups to Xray, which uses parallel DNS-over-HTTPS through the configured external outbound; this does not change how the resulting site connection is routed.
 
-The resolver serves recently expired cache entries during short upstream failures. `vpnproxi-dns-health.timer` probes an uncached name every 15 seconds and watches dnsmasq queue-saturation events; after two consecutive unhealthy windows it restarts dnsmasq, and persistent failures may restart Xray no more than once every five minutes.
+The resolver serves recently expired cache entries during short upstream failures. `vpnproxi-dns-health.timer` probes an uncached name every 15 seconds. A successful probe always wins over old queue-saturation messages; after two consecutive failed probes it restarts dnsmasq, with a two-minute resolver cooldown, and persistent failures may restart Xray no more than once every five minutes.
 
 ### Force Xray
 

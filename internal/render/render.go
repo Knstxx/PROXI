@@ -452,8 +452,8 @@ no-resolv
 bogus-priv
 local=/local/
 cache-size=10000
-dns-forward-max=150
-max-tcp-connections=20
+dns-forward-max=512
+max-tcp-connections=64
 neg-ttl=60
 use-stale-cache=86400
 address=/eokai.com/#
@@ -596,6 +596,7 @@ STATE_DIR=/run/vpnproxi
 STATE_FILE="$STATE_DIR/dns-health.state"
 LOCK_FILE="$STATE_DIR/dns-health.lock"
 FAILURE_THRESHOLD=2
+DNSMASQ_RESTART_COOLDOWN=120
 XRAY_RESTART_COOLDOWN=300
 
 [[ "$MODE" == "direct" ]] && exit 0
@@ -617,38 +618,47 @@ fi
 failures=0
 recovery_stage=0
 last_xray_restart=0
+last_dnsmasq_restart=0
 if [[ -r "$STATE_FILE" ]]; then
-  read -r saved_failures saved_stage saved_xray_restart < "$STATE_FILE" || true
+  read -r saved_failures saved_stage saved_xray_restart saved_dnsmasq_restart < "$STATE_FILE" || true
   [[ "${saved_failures:-}" =~ ^[0-9]+$ ]] && failures="$saved_failures"
   [[ "${saved_stage:-}" =~ ^[0-9]+$ ]] && recovery_stage="$saved_stage"
   [[ "${saved_xray_restart:-}" =~ ^[0-9]+$ ]] && last_xray_restart="$saved_xray_restart"
+  [[ "${saved_dnsmasq_restart:-}" =~ ^[0-9]+$ ]] && last_dnsmasq_restart="$saved_dnsmasq_restart"
 fi
 
 probe_name="vpnproxi-health-${RANDOM}-$(date +%%s).example.com"
 probe_output=""
 probe_ok=0
-queue_saturated=0
 if probe_output=$(timeout 5s dig +time=3 +tries=1 "@$DNS_SERVER" -p "$DNS_PORT" "$probe_name" A +noall +comments 2>&1) \
   && grep -Eq 'status: (NOERROR|NXDOMAIN)' <<<"$probe_output"; then
   probe_ok=1
 fi
+
+# A successful uncached lookup proves that the resolver is healthy. Old queue
+# saturation messages must not turn a healthy probe into a restart loop.
+if (( probe_ok == 1 )); then
+  printf '0 0 %%s %%s\n' "$last_xray_restart" "$last_dnsmasq_restart" > "$STATE_FILE"
+  exit 0
+fi
+
+queue_saturated=0
 overload_output=$(journalctl -t dnsmasq --since '30 seconds ago' \
   --grep 'Maximum number of concurrent DNS queries reached' -n 1 --output=cat --no-pager 2>/dev/null || true)
 [[ -n "$overload_output" ]] && queue_saturated=1
 
-if (( probe_ok == 1 && queue_saturated == 0 )); then
-  printf '0 0 %%s\n' "$last_xray_restart" > "$STATE_FILE"
-  exit 0
-fi
-
 failures=$((failures + 1))
-printf '%%s %%s %%s\n' "$failures" "$recovery_stage" "$last_xray_restart" > "$STATE_FILE"
+printf '%%s %%s %%s %%s\n' "$failures" "$recovery_stage" "$last_xray_restart" "$last_dnsmasq_restart" > "$STATE_FILE"
 logger -t vpnproxi-dns-health "unhealthy count=$failures probe_ok=$probe_ok queue_saturated=$queue_saturated server=$DNS_SERVER port=$DNS_PORT"
 if (( failures < FAILURE_THRESHOLD )); then
   exit 0
 fi
 
 now=$(date +%%s)
+if (( now - last_dnsmasq_restart < DNSMASQ_RESTART_COOLDOWN )); then
+  logger -t vpnproxi-dns-health "resolver recovery cooling down; no restart"
+  exit 0
+fi
 if (( recovery_stage > 0 && now - last_xray_restart >= XRAY_RESTART_COOLDOWN )); then
   logger -t vpnproxi-dns-health "persistent DNS failure; restarting Xray and dnsmasq"
   systemctl restart xray.service
@@ -657,7 +667,8 @@ else
   logger -t vpnproxi-dns-health "DNS failure threshold reached; restarting dnsmasq"
 fi
 systemctl restart vpnproxi-dnsmasq.service
-printf '0 1 %%s\n' "$last_xray_restart" > "$STATE_FILE"
+last_dnsmasq_restart="$now"
+printf '0 1 %%s %%s\n' "$last_xray_restart" "$last_dnsmasq_restart" > "$STATE_FILE"
 `, routeMode(state), gatewayIP)
 }
 

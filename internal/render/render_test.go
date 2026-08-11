@@ -90,7 +90,7 @@ func TestXrayConfigContainsTransparentInboundAndOutboundMark(t *testing.T) {
 	if strings.Contains(firewall, `--match-set "$PROXY_SET" dst -j TPROXY`) || strings.Contains(firewall, `conf-file=/usr/local/etc/vpnproxi/dnsmasq-routes.conf`) {
 		t.Fatalf("selective routing must no longer depend on dnsmasq/ipset classification: %s", firewall)
 	}
-	if !strings.Contains(firewall, `dns-forward-max=150`) || !strings.Contains(firewall, `max-tcp-connections=20`) {
+	if !strings.Contains(firewall, `dns-forward-max=512`) || !strings.Contains(firewall, `max-tcp-connections=64`) {
 		t.Fatalf("dnsmasq must bound whole-network DNS bursts: %s", firewall)
 	}
 	if !strings.Contains(firewall, `use-stale-cache=86400`) {
@@ -273,9 +273,12 @@ func TestDNSHealthScriptUsesConsecutiveFailuresAndRecoveryCooldown(t *testing.T)
 	script := DNSHealthScript(state)
 	for _, want := range []string{
 		`FAILURE_THRESHOLD=2`,
+		`DNSMASQ_RESTART_COOLDOWN=120`,
 		`XRAY_RESTART_COOLDOWN=300`,
 		`vpnproxi-health-${RANDOM}-$(date +%s).example.com`,
 		`status: (NOERROR|NXDOMAIN)`,
+		`if (( probe_ok == 1 )); then`,
+		`resolver recovery cooling down; no restart`,
 		`Maximum number of concurrent DNS queries reached`,
 		`queue_saturated`,
 		`systemctl restart vpnproxi-dnsmasq.service`,

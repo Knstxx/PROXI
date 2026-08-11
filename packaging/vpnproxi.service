@@ -9,6 +9,10 @@ EnvironmentFile=/etc/vpnproxi/vpnproxi.env
 ExecStart=/usr/local/bin/vpnproxi --addr :8443 --log /var/log/vpnproxi/vpnproxi.log
 Restart=on-failure
 RestartSec=3
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+LimitNOFILE=65536
 
 [Install]
 WantedBy=multi-user.target

@@ -6,6 +6,7 @@ import (
 	"io/fs"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -31,6 +32,7 @@ type Service struct {
 	authStore    *AuthStore
 	activityLog  *ActivityLog
 	trafficStore *TrafficStore
+	loginLimiter *loginLimiter
 	stopTraffic  chan struct{}
 }
 
@@ -54,7 +56,7 @@ func NewService(opts Options) (*Service, error) {
 		}
 	}
 	svc := &Service{
-		store: store, staticFS: opts.StaticFS, applyEnabled: opts.ApplyEnabled, adminToken: opts.AdminToken, authStore: authStore, activityLog: NewActivityLog(opts.LogPath),
+		store: store, staticFS: opts.StaticFS, applyEnabled: opts.ApplyEnabled, adminToken: opts.AdminToken, authStore: authStore, activityLog: NewActivityLog(opts.LogPath), loginLimiter: newLoginLimiter(),
 		stopTraffic: make(chan struct{}),
 	}
 	if opts.ApplyEnabled && opts.TrafficPath != "" {
@@ -110,6 +112,7 @@ func (s *Service) loginHandler(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusServiceUnavailable, errors.New("password login is not configured"))
 		return
 	}
+	clientIP := requestClientIP(r)
 	var body struct {
 		Username string `json:"username"`
 		Password string `json:"password"`
@@ -118,12 +121,20 @@ func (s *Service) loginHandler(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
+	if allowed, retryAfter := s.loginLimiter.Allow(clientIP); !allowed {
+		seconds := int(retryAfter.Seconds()) + 1
+		w.Header().Set("Retry-After", strconv.Itoa(seconds))
+		s.activityLog.Event("auth.login.limited", "admin login rate limited", map[string]any{"remote": clientIP})
+		writeError(w, http.StatusTooManyRequests, errors.New("too many login attempts; try again later"))
+		return
+	}
 	if err := s.authStore.Login(w, r, body.Username, body.Password); err != nil {
-		s.activityLog.Event("auth.login.failed", "admin login failed", map[string]any{"username": body.Username, "remote": r.RemoteAddr})
+		s.activityLog.Event("auth.login.failed", "admin login failed", map[string]any{"username": body.Username, "remote": clientIP})
 		writeError(w, http.StatusUnauthorized, errors.New("invalid username or password"))
 		return
 	}
-	s.activityLog.Event("auth.login", "admin logged in", map[string]any{"username": strings.TrimSpace(body.Username), "remote": r.RemoteAddr})
+	s.loginLimiter.Reset(clientIP)
+	s.activityLog.Event("auth.login", "admin logged in", map[string]any{"username": strings.TrimSpace(body.Username), "remote": clientIP})
 	writeJSON(w, map[string]any{"ok": true, "username": strings.TrimSpace(body.Username)}, nil)
 }
 

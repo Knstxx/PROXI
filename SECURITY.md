@@ -5,6 +5,7 @@ VPNproxi controls host networking, StrongSwan and Xray. Treat the web UI as a pr
 ## Required Production Defaults
 
 - Use a strong administrator password. The installer stores only a bcrypt hash in `/etc/vpnproxi/admin.json`.
+- Password login is limited to five attempts per client address in ten minutes. The bundled fail2ban jail additionally blocks repeated failed logins for one hour.
 - Create IPsec client credentials explicitly in the UI. The initial state does not ship with a default VPN user.
 - Put the UI behind HTTPS. `scripts/install.sh --domain example.com` installs Caddy and reverse-proxies to localhost.
 - Restrict access to the UI with firewall rules or a private admin network when possible.

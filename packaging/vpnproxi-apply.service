@@ -7,6 +7,9 @@ Wants=network-online.target
 Type=oneshot
 EnvironmentFile=/etc/vpnproxi/vpnproxi.env
 ExecStart=/usr/local/bin/vpnproxi --apply-once
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
 
 [Install]
 WantedBy=multi-user.target
